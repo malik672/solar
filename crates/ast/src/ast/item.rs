@@ -94,37 +94,6 @@ impl fmt::Debug for ItemKind<'_> {
             ItemKind::Event(item) => item.fmt(f),
         }
     }
-    //    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    //     match self {
-    //         Self::Pragma(_) => f.write_str("ItemKind::Pragma(...)"),
-    //         Self::Import(_) => f.write_str("ItemKind::Import(...)"),
-    //         Self::Using(_) => f.write_str("ItemKind::Using(...)"),
-    //         Self::Contract(item) => f.debug_tuple("ItemKind::Contract")
-    //             .field(&item.name)
-    //             .finish(),
-    //         Self::Function(item) => f.debug_tuple("ItemKind::Function")
-    //             .field(&item.header.name)
-    //             .finish(),
-    //         Self::Variable(item) => f.debug_tuple("ItemKind::Variable")
-    //             .field(&item.name)
-    //             .finish(),
-    //         Self::Struct(item) => f.debug_tuple("ItemKind::Struct")
-    //             .field(&item.name)
-    //             .finish(),
-    //         Self::Enum(item) => f.debug_tuple("ItemKind::Enum")
-    //             .field(&item.name)
-    //             .finish(),
-    //         Self::Udvt(item) => f.debug_tuple("ItemKind::Udvt")
-    //             .field(&item.name)
-    //             .finish(),
-    //         Self::Error(item) => f.debug_tuple("ItemKind::Error")
-    //             .field(&item.name)
-    //             .finish(),
-    //         Self::Event(item) => f.debug_tuple("ItemKind::Event")
-    //             .field(&item.name)
-    //             .finish(),
-    //     }
-    // }
 }
 
 impl ItemKind<'_> {
