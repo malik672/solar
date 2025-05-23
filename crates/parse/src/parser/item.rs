@@ -8,7 +8,8 @@ use solar_interface::{diagnostics::{DiagCtxt, DiagMsg}, error_code, kw, sym, Ide
 impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Parses a source unit.
     #[instrument(level = "debug", skip_all)]
-    pub fn parse_file(&mut self, dcx: &'sess DiagCtxt) -> PResult<'sess, SourceUnit<'ast>> {
+    pub fn parse_file(&mut self) -> PResult<'sess, SourceUnit<'ast>> {
+        let dcx = self.dcx();
         self.parse_items(TokenKind::Eof, dcx).map(SourceUnit::new)
     }
 

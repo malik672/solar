@@ -14,14 +14,13 @@ fn main() -> Result<(), EmittedDiagnostics> {
     let sess = Session::builder().with_buffer_emitter(solar::interface::ColorChoice::Auto).build();
 
     // Enter the context and parse the file.
-    let dcx = DiagCtxt::new_early();
     let _ = sess.enter(|| -> solar::interface::Result<()> {
         // Set up the parser.
         let arena = ast::Arena::new();
         let mut parser = Parser::from_file(&sess, &arena, path)?;
 
         // Parse the file.
-        let ast = parser.parse_file(&dcx).map_err(|e| e.emit())?;
+        let ast = parser.parse_file().map_err(|e| e.emit())?;
         println!("parsed {path:?}: {ast:#?}");
         Ok(())
     });
