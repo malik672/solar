@@ -3,17 +3,17 @@ use crate::{PResult, Parser};
 use itertools::Itertools;
 use smallvec::SmallVec;
 use solar_ast::{token::*, *};
-use solar_interface::{diagnostics::DiagMsg, error_code, kw, sym, Ident, Span};
+use solar_interface::{diagnostics::{DiagCtxt, DiagMsg}, error_code, kw, sym, Ident, Span};
 
 impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Parses a source unit.
     #[instrument(level = "debug", skip_all)]
-    pub fn parse_file(&mut self) -> PResult<'sess, SourceUnit<'ast>> {
-        self.parse_items(TokenKind::Eof).map(SourceUnit::new)
+    pub fn parse_file(&mut self, dcx: &'sess DiagCtxt) -> PResult<'sess, SourceUnit<'ast>> {
+        self.parse_items(TokenKind::Eof, dcx).map(SourceUnit::new)
     }
 
     /// Parses a list of items until the given token is encountered.
-    fn parse_items(&mut self, end: TokenKind) -> PResult<'sess, Box<'ast, [Item<'ast>]>> {
+    fn parse_items(&mut self, end: TokenKind, dcx: &'sess DiagCtxt) -> PResult<'sess, Box<'ast, [Item<'ast>]>> {
         let get_msg_note = |this: &mut Self| {
             let (prefix, list, link);
             if this.in_contract {
@@ -32,31 +32,33 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         };
 
         let mut items = Vec::new();
-        while let Some(item) = self.parse_item()? {
+        while let Some(item) = self.parse_item(dcx)? {
             if self.in_contract && !item.is_allowed_in_contract() {
                 let msg = format!("{}s are not allowed in contracts", item.description());
                 let (_, note) = get_msg_note(self);
-                self.dcx().err(msg).span(item.span).note(note).emit();
+                // self.dcx().err(msg).span(item.span).note(note).emit();
+                dcx.err(msg).span(item.span).note(note).emit();
             } else {
                 items.push(item);
             }
         }
         if !self.eat(end) {
             let (msg, note) = get_msg_note(self);
-            return Err(self.dcx().err(msg).span(self.token.span).note(note));
+            // return Err(self.dcx().err(msg).span(self.token.span).note(note));
+             return Err(dcx.err(msg).span(self.token.span).note(note));
         }
         Ok(self.alloc_vec(items))
     }
 
     /// Parses an item.
     #[instrument(level = "debug", skip_all)]
-    pub fn parse_item(&mut self) -> PResult<'sess, Option<Item<'ast>>> {
+    pub fn parse_item(&mut self, dcx: &'sess DiagCtxt) -> PResult<'sess, Option<Item<'ast>>> {
         let docs = self.parse_doc_comments();
-        self.parse_spanned(Self::parse_item_kind)
+        self.parse_spanned(|this| this.parse_item_kind(dcx))
             .map(|(span, kind)| kind.map(|kind| Item { docs, span, kind }))
     }
 
-    fn parse_item_kind(&mut self) -> PResult<'sess, Option<ItemKind<'ast>>> {
+    fn parse_item_kind(&mut self, dcx: &'sess DiagCtxt) -> PResult<'sess, Option<ItemKind<'ast>>> {
         let kind = if self.is_function_like() {
             self.parse_function().map(ItemKind::Function)
         } else if self.eat_keyword(kw::Struct) {
@@ -64,7 +66,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         } else if self.eat_keyword(kw::Event) {
             self.parse_event().map(ItemKind::Event)
         } else if self.is_contract_like() {
-            self.parse_contract().map(ItemKind::Contract)
+            self.parse_contract(dcx).map(ItemKind::Contract)
         } else if self.eat_keyword(kw::Enum) {
             self.parse_enum().map(ItemKind::Enum)
         } else if self.eat_keyword(kw::Type) {
@@ -308,7 +310,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Parses a contract definition.
     ///
     /// Expects the current token to be a contract-like keyword.
-    fn parse_contract(&mut self) -> PResult<'sess, ItemContract<'ast>> {
+    fn parse_contract(&mut self, dcx: &'sess DiagCtxt) -> PResult<'sess, ItemContract<'ast>> {
         let TokenKind::Ident(kw) = self.token.kind else {
             unreachable!("parse_contract called without contract-like keyword");
         };
@@ -336,7 +338,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                     let span = |bases: &[Modifier<'_>]| {
                         Span::join_first_last(bases.iter().map(|m| m.span()))
                     };
-                    self.dcx()
+                    dcx
                         .err(msg)
                         .span(span(new_bases))
                         .span_note(span(prev), "previous definition")
@@ -348,7 +350,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 let new_layout = self.parse_storage_layout_specifier()?;
                 if let Some(prev) = &layout {
                     let msg = "storage layout already specified";
-                    self.dcx()
+                    dcx
                         .err(msg)
                         .span(new_layout.span)
                         .span_note(prev.span, "previous definition")
@@ -364,13 +366,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         if let Some(layout) = &layout {
             if !kind.is_contract() {
                 let msg = "storage layout is only allowed for contracts";
-                self.dcx().err(msg).span(layout.span).emit();
+                dcx.err(msg).span(layout.span).emit();
             }
         }
 
         self.expect(TokenKind::OpenDelim(Delimiter::Brace))?;
         let body =
-            self.in_contract(|this| this.parse_items(TokenKind::CloseDelim(Delimiter::Brace)))?;
+            self.in_contract(|this| this.parse_items(TokenKind::CloseDelim(Delimiter::Brace), dcx))?;
 
         Ok(ItemContract { kind, name, layout, bases: bases.unwrap_or_default(), body })
     }
