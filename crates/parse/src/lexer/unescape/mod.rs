@@ -172,44 +172,165 @@ fn scan_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
 /// Unescape characters in a string literal.
 ///
 /// See [`unescape_literal`] for more details.
+// fn unescape_str<F>(src: &str, is_unicode: bool, mut callback: F)
+// where
+//     F: FnMut(Range<usize>, Result<u32, EscapeError>),
+// {
+//     let mut chars = src.chars();
+//     // The `start` and `end` computation here is complicated because
+//     // `skip_ascii_whitespace` makes us to skip over chars without counting
+//     // them in the range computation.
+//     while let Some(c) = chars.next() {
+//         let start = src.len() - chars.as_str().len() - c.len_utf8();
+//         let res = match c {
+//             '\\' => match chars.clone().next() {
+//                 Some('\r') if chars.clone().nth(1) == Some('\n') => {
+//                     // +2 for the '\\' and '\r' characters.
+//                     skip_ascii_whitespace(&mut chars, start + 2, &mut callback);
+//                     continue;
+//                 }
+//                 Some('\n') => {
+//                     // +1 for the '\\' character.
+//                     skip_ascii_whitespace(&mut chars, start + 1, &mut callback);
+//                     continue;
+//                 }
+//                 _ => scan_escape(&mut chars),
+//             },
+//             '\n' => Err(EscapeError::StrNewline),
+//             '\r' => {
+//                 if chars.clone().next() == Some('\n') {
+//                     continue;
+//                 }
+//                 Err(EscapeError::BareCarriageReturn)
+//             }
+//             c if !is_unicode && !c.is_ascii() => Err(EscapeError::StrNonAsciiChar),
+//             c => Ok(c as u32),
+//         };
+//         let end = src.len() - chars.as_str().len();
+//         callback(start..end, res);
+//     }
+// }
+
 fn unescape_str<F>(src: &str, is_unicode: bool, mut callback: F)
 where
     F: FnMut(Range<usize>, Result<u32, EscapeError>),
 {
-    let mut chars = src.chars();
-    // The `start` and `end` computation here is complicated because
-    // `skip_ascii_whitespace` makes us to skip over chars without counting
-    // them in the range computation.
-    while let Some(c) = chars.next() {
-        let start = src.len() - chars.as_str().len() - c.len_utf8();
-        let res = match c {
-            '\\' => match chars.clone().next() {
-                Some('\r') if chars.clone().nth(1) == Some('\n') => {
-                    // +2 for the '\\' and '\r' characters.
-                    skip_ascii_whitespace(&mut chars, start + 2, &mut callback);
-                    continue;
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    
+    while i < bytes.len() {
+        let start = i;
+        
+        // SAFETY: We always check bounds before accessing bytes
+        match bytes[i] {
+            b'\\' => {
+                let next_idx = i + 1;
+                if next_idx >= bytes.len() {
+                    // Lone backslash at the end of the string
+                    callback(start..start+1, Err(EscapeError::LoneSlash));
+                    break;
                 }
-                Some('\n') => {
-                    // +1 for the '\\' character.
-                    skip_ascii_whitespace(&mut chars, start + 1, &mut callback);
-                    continue;
+                
+                match bytes[next_idx] {
+                    // Handle line continuation with '\r\n'
+                    b'\r' if next_idx + 1 < bytes.len() && bytes[next_idx + 1] == b'\n' => {
+                        // Skip the escape sequence and whitespace
+                        let continuation_start = i + 2; // +2 for the '\\' and '\r' characters
+                        i = skip_ascii_whitespace_bytes(bytes, continuation_start + 1, &mut callback);
+                        continue;
+                    },
+                    
+                    // Handle line continuation with '\n'
+                    b'\n' => {
+                        // Skip the escape sequence and whitespace
+                        let continuation_start = i + 1; // +1 for the '\\' character
+                        i = skip_ascii_whitespace_bytes(bytes, continuation_start + 1, &mut callback);
+                        continue;
+                    },
+                    
+                    // Handle normal escape sequences
+                    _ => {
+                        // We need to switch to char processing for Unicode escape sequences
+                        let mut chars = src[i..].chars();
+                        chars.next(); // Skip the backslash
+                        
+                        let res = scan_escape(&mut chars);
+                        let consumed = src.len() - i - chars.as_str().len();
+                        callback(start..start+consumed, res);
+                        i += consumed;
+                    }
                 }
-                _ => scan_escape(&mut chars),
             },
-            '\n' => Err(EscapeError::StrNewline),
-            '\r' => {
-                if chars.clone().next() == Some('\n') {
+            b'\n' => {
+                callback(start..start+1, Err(EscapeError::StrNewline));
+                i += 1;
+            },
+            b'\r' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                    // Skip \r in \r\n sequence
+                    i += 1;
                     continue;
                 }
-                Err(EscapeError::BareCarriageReturn)
+                callback(start..start+1, Err(EscapeError::BareCarriageReturn));
+                i += 1;
+            },
+            _ => {
+                // For ASCII characters, we can process byte-by-byte
+                if bytes[i] < 128 {
+                    callback(start..start+1, Ok(bytes[i] as u32));
+                    i += 1;
+                } else {
+                    // For non-ASCII, need to use char iterator for proper UTF-8 handling
+                    let ch = src[i..].chars().next().unwrap();
+                    let ch_len = ch.len_utf8();
+                    
+                    if !is_unicode && !ch.is_ascii() {
+                        callback(start..start+ch_len, Err(EscapeError::StrNonAsciiChar));
+                    } else {
+                        callback(start..start+ch_len, Ok(ch as u32));
+                    }
+                    i += ch_len;
+                }
             }
-            c if !is_unicode && !c.is_ascii() => Err(EscapeError::StrNonAsciiChar),
-            c => Ok(c as u32),
-        };
-        let end = src.len() - chars.as_str().len();
-        callback(start..end, res);
+        }
     }
 }
+
+
+fn skip_ascii_whitespace_bytes<F>(bytes: &[u8], start_idx: usize, callback: &mut F) -> usize 
+where
+    F: FnMut(Range<usize>, Result<u32, EscapeError>),
+{
+    let mut i = start_idx;
+    
+    // Skip whitespace
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' => {
+                i += 1;
+                continue;
+            },
+            b'\n' => {
+                // Found a newline - report error and skip
+                let range_start = i;
+                i += 1;
+                callback(range_start..i, Err(EscapeError::CannotSkipMultipleLines));
+                continue;
+            },
+            b'\r' if i + 1 < bytes.len() && bytes[i + 1] == b'\n' => {
+                // Found a CRLF - report error and skip
+                let range_start = i;
+                i += 2;
+                callback(range_start..i, Err(EscapeError::CannotSkipMultipleLines));
+                continue;
+            },
+            _ => break,
+        }
+    }
+    
+    i
+}
+
 
 /// Skips over whitespace after a "\\\n" escape sequence.
 ///

@@ -81,33 +81,17 @@ impl fmt::Debug for ItemKind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ItemKind::")?;
         match self {
-                Self::Pragma(_) => f.write_str("ItemKind::Pragma(...)"),
-            Self::Import(_) => f.write_str("ItemKind::Import(...)"),
-            Self::Using(_) => f.write_str("ItemKind::Using(...)"),
-            Self::Contract(item) => f.debug_tuple("ItemKind::Contract")
-                .field(&item.name)
-                .finish(),
-            Self::Function(item) => f.debug_tuple("ItemKind::Function")
-                .field(&item.header.name)
-                .finish(),
-            Self::Variable(item) => f.debug_tuple("ItemKind::Variable")
-                .field(&item.name)
-                .finish(),
-            Self::Struct(item) => f.debug_tuple("ItemKind::Struct")
-                .field(&item.name)
-                .finish(),
-            Self::Enum(item) => f.debug_tuple("ItemKind::Enum")
-                .field(&item.name)
-                .finish(),
-            Self::Udvt(item) => f.debug_tuple("ItemKind::Udvt")
-                .field(&item.name)
-                .finish(),
-            Self::Error(item) => f.debug_tuple("ItemKind::Error")
-                .field(&item.name)
-                .finish(),
-            Self::Event(item) => f.debug_tuple("ItemKind::Event")
-                .field(&item.name)
-                .finish(),
+            ItemKind::Pragma(item) => item.fmt(f),
+            ItemKind::Import(item) =>  item.fmt(f),
+            ItemKind::Using(item) => item.fmt(f),
+            ItemKind::Contract(item) => item.fmt(f),
+            ItemKind::Function(item) => item.fmt(f),
+            ItemKind::Variable(item) => item.fmt(f),
+            ItemKind::Struct(item) => item.fmt(f),
+            ItemKind::Enum(item) => item.fmt(f),
+            ItemKind::Udvt(item) => item.fmt(f),
+            ItemKind::Error(item) => item.fmt(f),
+            ItemKind::Event(item) => item.fmt(f),
         }
     }
 }
