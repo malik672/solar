@@ -235,27 +235,28 @@ where
                     // Handle line continuation with '\r\n'
                     b'\r' if next_idx + 1 < bytes.len() && bytes[next_idx + 1] == b'\n' => {
                         // Skip the escape sequence and whitespace
-                        let continuation_start = i + 2; // +2 for the '\\' and '\r' characters
+                        let continuation_start = next_idx + 1; // Points to '\n'
                         i = skip_ascii_whitespace_bytes(bytes, continuation_start + 1, &mut callback);
                         continue;
                     },
                     
                     // Handle line continuation with '\n'
                     b'\n' => {
-                        // Skip the escape sequence and whitespace
-                        let continuation_start = i + 1; // +1 for the '\\' character
-                        i = skip_ascii_whitespace_bytes(bytes, continuation_start + 1, &mut callback);
+                        // Skip the escape sequence and whitespace  
+                        i = skip_ascii_whitespace_bytes(bytes, next_idx + 1, &mut callback);
                         continue;
                     },
                     
                     // Handle normal escape sequences
                     _ => {
-                        // We need to switch to char processing for Unicode escape sequences
-                        let mut chars = src[i..].chars();
-                        chars.next(); // Skip the backslash
+                        // Create iterator from the current position
+                        let remaining = &src[i..];
+                        let mut chars = remaining.chars();
+                        // Skip the backslash
+                        chars.next(); 
                         
                         let res = scan_escape(&mut chars);
-                        let consumed = src.len() - i - chars.as_str().len();
+                        let consumed = remaining.len() - chars.as_str().len();
                         callback(start..start+consumed, res);
                         i += consumed;
                     }
@@ -274,28 +275,40 @@ where
                 callback(start..start+1, Err(EscapeError::BareCarriageReturn));
                 i += 1;
             },
+            // Fast path for ASCII characters (0-127)
+            ascii_byte @ 0..=127 => {
+                callback(start..start+1, Ok(ascii_byte as u32));
+                i += 1;
+            },
+            // Slow path for non-ASCII UTF-8 sequences
             _ => {
-                // For ASCII characters, we can process byte-by-byte
-                if bytes[i] < 128 {
-                    callback(start..start+1, Ok(bytes[i] as u32));
-                    i += 1;
+                // Find the end of this UTF-8 sequence using byte patterns
+                let ch_len = match bytes[i] {
+                     // 2-byte sequence
+                    0b110_00000..=0b110_11111 => 2,
+                    // 3-byte sequence 
+                    0b1110_0000..=0b1110_1111 => 3,  
+                     // 4-byte sequence
+                    0b11110_000..=0b11110_111 => 4,
+                    // Invalid UTF-8, treat as single byte
+                    _ => 1, 
+                };
+                
+                // Ensure we don't go out of bounds
+                let actual_len = ch_len.min(bytes.len() - i);
+                
+                if !is_unicode {
+                    callback(start..start+actual_len, Err(EscapeError::StrNonAsciiChar));
                 } else {
-                    // For non-ASCII, need to use char iterator for proper UTF-8 handling
-                    let ch = src[i..].chars().next().unwrap();
-                    let ch_len = ch.len_utf8();
-                    
-                    if !is_unicode && !ch.is_ascii() {
-                        callback(start..start+ch_len, Err(EscapeError::StrNonAsciiChar));
-                    } else {
-                        callback(start..start+ch_len, Ok(ch as u32));
-                    }
-                    i += ch_len;
+                    // Only decode the character if we need its value
+                    let ch = src[i..i+actual_len].chars().next().unwrap_or('\u{FFFD}');
+                    callback(start..start+actual_len, Ok(ch as u32));
                 }
+                i += actual_len;
             }
         }
     }
 }
-
 
 fn skip_ascii_whitespace_bytes<F>(bytes: &[u8], start_idx: usize, callback: &mut F) -> usize 
 where
