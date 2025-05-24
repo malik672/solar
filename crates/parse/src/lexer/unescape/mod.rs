@@ -172,6 +172,7 @@ fn scan_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
 /// Unescape characters in a string literal.
 ///
 /// See [`unescape_literal`] for more details.
+
 fn unescape_str<F>(src: &str, is_unicode: bool, mut callback: F)
 where
     F: FnMut(Range<usize>, Result<u32, EscapeError>),
@@ -182,88 +183,66 @@ where
     while i < bytes.len() {
         let start = i;
         
-        // SAFETY: We always check bounds before accessing bytes
         match bytes[i] {
             b'\\' => {
-                let next_idx = i + 1;
-                if next_idx >= bytes.len() {
-                    // Lone backslash at the end of the string
-                    callback(start..start+1, Err(EscapeError::LoneSlash));
+                if i + 1 >= bytes.len() {
+                    callback(start..start + 1, Err(EscapeError::LoneSlash));
                     break;
                 }
                 
-                match bytes[next_idx] {
-                    // Handle line continuation with '\r\n'
-                    b'\r' if next_idx + 1 < bytes.len() && bytes[next_idx + 1] == b'\n' => {
-                        // Skip the escape sequence and whitespace
-                        let continuation_start = next_idx + 1; // Points to '\n'
-                        i = skip_ascii_whitespace_bytes(bytes, continuation_start + 1, &mut callback);
+                match bytes[i + 1] {
+                    // Line continuation: \r\n
+                    b'\r' if i + 2 < bytes.len() && bytes[i + 2] == b'\n' => {
+                        i = skip_ascii_whitespace_bytes(bytes, i + 3, &mut callback);
                         continue;
                     },
-                    
-                    // Handle line continuation with '\n'
+                    // Line continuation: \n
                     b'\n' => {
-                        // Skip the escape sequence and whitespace  
-                        i = skip_ascii_whitespace_bytes(bytes, next_idx + 1, &mut callback);
+                        i = skip_ascii_whitespace_bytes(bytes, i + 2, &mut callback);
                         continue;
                     },
-                    
-                    // Handle normal escape sequences
+                    // Normal escape sequences
                     _ => {
-                        // Create iterator from the current position
                         let remaining = &src[i..];
                         let mut chars = remaining.chars();
-                        // Skip the backslash
-                        chars.next(); 
+                        chars.next(); // Skip backslash
                         
                         let res = scan_escape(&mut chars);
                         let consumed = remaining.len() - chars.as_str().len();
-                        callback(start..start+consumed, res);
+                        callback(start..start + consumed, res);
                         i += consumed;
                     }
                 }
             },
             b'\n' => {
-                callback(start..start+1, Err(EscapeError::StrNewline));
+                callback(start..start + 1, Err(EscapeError::StrNewline));
                 i += 1;
             },
             b'\r' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                    // Skip \r in \r\n sequence
-                    i += 1;
+                    i += 1; // Skip \r, will process \n next
                     continue;
                 }
-                callback(start..start+1, Err(EscapeError::BareCarriageReturn));
+                callback(start..start + 1, Err(EscapeError::BareCarriageReturn));
                 i += 1;
             },
-            // Fast path for ASCII characters (0-127)
+            // Fast path for ASCII (0-127)
             ascii_byte @ 0..=127 => {
-                callback(start..start+1, Ok(ascii_byte as u32));
+                callback(start..start + 1, Ok(ascii_byte as u32));
                 i += 1;
             },
-            // Slow path for non-ASCII UTF-8 sequences
+            // Non-ASCII UTF-8 sequences
             _ => {
-                // Find the end of this UTF-8 sequence using byte patterns
-                let ch_len = match bytes[i] {
-                     // 2-byte sequence
-                    0b110_00000..=0b110_11111 => 2,
-                    // 3-byte sequence 
-                    0b1110_0000..=0b1110_1111 => 3,  
-                     // 4-byte sequence
-                    0b11110_000..=0b11110_111 => 4,
-                    // Invalid UTF-8, treat as single byte
-                    _ => 1, 
-                };
-                
-                // Ensure we don't go out of bounds
+                // Use UTF-8 byte patterns to determine character length
+                let ch_len = utf8_char_len(bytes[i]);
                 let actual_len = ch_len.min(bytes.len() - i);
                 
                 if !is_unicode {
-                    callback(start..start+actual_len, Err(EscapeError::StrNonAsciiChar));
+                    callback(start..start + actual_len, Err(EscapeError::StrNonAsciiChar));
                 } else {
-                    // Only decode the character if we need its value
-                    let ch = src[i..i+actual_len].chars().next().unwrap_or('\u{FFFD}');
-                    callback(start..start+actual_len, Ok(ch as u32));
+                    // Fast UTF-8 decoding for valid sequences
+                    let codepoint = decode_utf8_fast(&bytes[i..i + actual_len]);
+                    callback(start..start + actual_len, Ok(codepoint));
                 }
                 i += actual_len;
             }
@@ -271,37 +250,61 @@ where
     }
 }
 
-fn skip_ascii_whitespace_bytes<F>(bytes: &[u8], start_idx: usize, callback: &mut F) -> usize 
+#[inline]
+fn utf8_char_len(first_byte: u8) -> usize {
+    match first_byte {
+        0b0000_0000..=0b0111_1111 => 1, // ASCII
+        0b1100_0000..=0b1101_1111 => 2, // 2-byte
+        0b1110_0000..=0b1110_1111 => 3, // 3-byte
+        0b1111_0000..=0b1111_0111 => 4, // 4-byte
+        _ => 1, // Invalid, treat as single byte
+    }
+}
+
+#[inline]
+fn decode_utf8_fast(bytes: &[u8]) -> u32 {
+    match bytes.len() {
+        1 => bytes[0] as u32,
+        2 => {
+            let b1 = bytes[0] as u32;
+            let b2 = bytes[1] as u32;
+            ((b1 & 0x1F) << 6) | (b2 & 0x3F)
+        },
+        3 => {
+            let b1 = bytes[0] as u32;
+            let b2 = bytes[1] as u32;
+            let b3 = bytes[2] as u32;
+            ((b1 & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
+        },
+        4 => {
+            let b1 = bytes[0] as u32;
+            let b2 = bytes[1] as u32;
+            let b3 = bytes[2] as u32;
+            let b4 = bytes[3] as u32;
+            ((b1 & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F)
+        },
+        _ => 0xFFFD, // Replacement character for invalid sequences
+    }
+}
+
+fn skip_ascii_whitespace_bytes<F>(bytes: &[u8], mut i: usize, callback: &mut F) -> usize 
 where
     F: FnMut(Range<usize>, Result<u32, EscapeError>),
 {
-    let mut i = start_idx;
-    
-    // Skip whitespace
     while i < bytes.len() {
         match bytes[i] {
-            b' ' | b'\t' => {
-                i += 1;
-                continue;
-            },
+            b' ' | b'\t' => i += 1,
             b'\n' => {
-                // Found a newline - report error and skip
-                let range_start = i;
+                callback(i..i + 1, Err(EscapeError::CannotSkipMultipleLines));
                 i += 1;
-                callback(range_start..i, Err(EscapeError::CannotSkipMultipleLines));
-                continue;
             },
             b'\r' if i + 1 < bytes.len() && bytes[i + 1] == b'\n' => {
-                // Found a CRLF - report error and skip
-                let range_start = i;
+                callback(i..i + 2, Err(EscapeError::CannotSkipMultipleLines));
                 i += 2;
-                callback(range_start..i, Err(EscapeError::CannotSkipMultipleLines));
-                continue;
             },
             _ => break,
         }
     }
-    
     i
 }
 
