@@ -172,33 +172,37 @@ fn scan_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
 /// Unescape characters in a string literal.
 ///
 /// See [`unescape_literal`] for more details.
-
 fn unescape_str<F>(src: &str, is_unicode: bool, mut callback: F)
 where
     F: FnMut(Range<usize>, Result<u32, EscapeError>),
 {
     let bytes = src.as_bytes();
+    let len = bytes.len();
     let mut i = 0;
     
-    while i < bytes.len() {
+    // Use unsafe indexing with manual bounds checking for better performance
+    while i < len {
         let start = i;
         
-        match bytes[i] {
+        // SAFETY: i < len is checked above
+        match unsafe { *bytes.get_unchecked(i) } {
             b'\\' => {
-                if i + 1 >= bytes.len() {
+                // Check bounds once for escape sequence
+                if i + 1 >= len {
                     callback(start..start + 1, Err(EscapeError::LoneSlash));
                     break;
                 }
                 
-                match bytes[i + 1] {
-                    // Line continuation: \r\n
-                    b'\r' if i + 2 < bytes.len() && bytes[i + 2] == b'\n' => {
-                        i = skip_ascii_whitespace_bytes(bytes, i + 3, &mut callback);
+                // SAFETY: i + 1 < len is checked above
+                match unsafe { *bytes.get_unchecked(i + 1) } {
+                    // Line continuation: \r\n (check bounds once)
+                    b'\r' if i + 2 < len && unsafe { *bytes.get_unchecked(i + 2) } == b'\n' => {
+                        i = skip_ascii_whitespace_bytes_fast(bytes, i + 3, &mut callback);
                         continue;
                     },
                     // Line continuation: \n
                     b'\n' => {
-                        i = skip_ascii_whitespace_bytes(bytes, i + 2, &mut callback);
+                        i = skip_ascii_whitespace_bytes_fast(bytes, i + 2, &mut callback);
                         continue;
                     },
                     // Normal escape sequences
@@ -219,29 +223,39 @@ where
                 i += 1;
             },
             b'\r' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+                // Check for \r\n sequence
+                if i + 1 < len && unsafe { *bytes.get_unchecked(i + 1) } == b'\n' {
                     i += 1; // Skip \r, will process \n next
                     continue;
                 }
                 callback(start..start + 1, Err(EscapeError::BareCarriageReturn));
                 i += 1;
             },
-            // Fast path for ASCII (0-127)
+            // Fast path for ASCII (0-127) - most common case
             ascii_byte @ 0..=127 => {
-                callback(start..start + 1, Ok(ascii_byte as u32));
-                i += 1;
+                // Batch process ASCII characters for better performance
+                let ascii_end = find_next_non_ascii_or_special(bytes, i, len);
+                if ascii_end > i + 1 {
+                    // Process multiple ASCII characters at once
+                    for j in i..ascii_end {
+                        let byte = unsafe { *bytes.get_unchecked(j) };
+                        callback(j..j + 1, Ok(byte as u32));
+                    }
+                    i = ascii_end;
+                } else {
+                    callback(start..start + 1, Ok(ascii_byte as u32));
+                    i += 1;
+                }
             },
             // Non-ASCII UTF-8 sequences
             _ => {
-                // Use UTF-8 byte patterns to determine character length
-                let ch_len = utf8_char_len(bytes[i]);
-                let actual_len = ch_len.min(bytes.len() - i);
+                // Optimized UTF-8 handling with better error checking
+                let (ch_len, codepoint) = decode_utf8_with_len(&bytes[i..]);
+                let actual_len = ch_len.min(len - i);
                 
                 if !is_unicode {
                     callback(start..start + actual_len, Err(EscapeError::StrNonAsciiChar));
                 } else {
-                    // Fast UTF-8 decoding for valid sequences
-                    let codepoint = decode_utf8_fast(&bytes[i..i + actual_len]);
                     callback(start..start + actual_len, Ok(codepoint));
                 }
                 i += actual_len;
@@ -250,57 +264,123 @@ where
     }
 }
 
+// Optimized function to find the end of a run of ASCII characters
 #[inline]
-fn utf8_char_len(first_byte: u8) -> usize {
-    match first_byte {
-        0b0000_0000..=0b0111_1111 => 1, // ASCII
-        0b1100_0000..=0b1101_1111 => 2, // 2-byte
-        0b1110_0000..=0b1110_1111 => 3, // 3-byte
-        0b1111_0000..=0b1111_0111 => 4, // 4-byte
-        _ => 1, // Invalid, treat as single byte
+fn find_next_non_ascii_or_special(bytes: &[u8], start: usize, len: usize) -> usize {
+    let mut i = start;
+    while i < len {
+        match unsafe { *bytes.get_unchecked(i) } {
+            // Stop at special characters that need processing
+            b'\\' | b'\n' | b'\r' => break,
+            // Stop at non-ASCII
+            128..=255 => break,
+            // Continue for regular ASCII
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+// Combined UTF-8 length detection and decoding for better performance
+#[inline]
+fn decode_utf8_with_len(bytes: &[u8]) -> (usize, u32) {
+    if bytes.is_empty() {
+        return (0, 0xFFFD);
+    }
+    
+    let first = bytes[0];
+    match first {
+        // ASCII - fast path
+        0x00..=0x7F => (1, first as u32),
+        
+        // 2-byte sequence
+        0xC0..=0xDF => {
+            if bytes.len() >= 2 {
+                let b1 = first as u32;
+                let b2 = bytes[1] as u32;
+                // Basic validation
+                if (b2 & 0xC0) == 0x80 {
+                    (2, ((b1 & 0x1F) << 6) | (b2 & 0x3F))
+                } else {
+                    (1, 0xFFFD)
+                }
+            } else {
+                (1, 0xFFFD)
+            }
+        },
+        
+        // 3-byte sequence
+        0xE0..=0xEF => {
+            if bytes.len() >= 3 {
+                let b1 = first as u32;
+                let b2 = bytes[1] as u32;
+                let b3 = bytes[2] as u32;
+                // Basic validation
+                if (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80 {
+                    (3, ((b1 & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F))
+                } else {
+                    (1, 0xFFFD)
+                }
+            } else {
+                (1, 0xFFFD)
+            }
+        },
+        
+        // 4-byte sequence
+        0xF0..=0xF7 => {
+            if bytes.len() >= 4 {
+                let b1 = first as u32;
+                let b2 = bytes[1] as u32;
+                let b3 = bytes[2] as u32;
+                let b4 = bytes[3] as u32;
+                // Basic validation
+                if (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80 && (b4 & 0xC0) == 0x80 {
+                    (4, ((b1 & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F))
+                } else {
+                    (1, 0xFFFD)
+                }
+            } else {
+                (1, 0xFFFD)
+            }
+        },
+        
+        // Invalid UTF-8 start byte
+        _ => (1, 0xFFFD),
     }
 }
 
-#[inline]
-fn decode_utf8_fast(bytes: &[u8]) -> u32 {
-    match bytes.len() {
-        1 => bytes[0] as u32,
-        2 => {
-            let b1 = bytes[0] as u32;
-            let b2 = bytes[1] as u32;
-            ((b1 & 0x1F) << 6) | (b2 & 0x3F)
-        },
-        3 => {
-            let b1 = bytes[0] as u32;
-            let b2 = bytes[1] as u32;
-            let b3 = bytes[2] as u32;
-            ((b1 & 0x0F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F)
-        },
-        4 => {
-            let b1 = bytes[0] as u32;
-            let b2 = bytes[1] as u32;
-            let b3 = bytes[2] as u32;
-            let b4 = bytes[3] as u32;
-            ((b1 & 0x07) << 18) | ((b2 & 0x3F) << 12) | ((b3 & 0x3F) << 6) | (b4 & 0x3F)
-        },
-        _ => 0xFFFD, // Replacement character for invalid sequences
-    }
-}
-
-fn skip_ascii_whitespace_bytes<F>(bytes: &[u8], mut i: usize, callback: &mut F) -> usize 
+// Optimized whitespace skipping with fewer bounds checks
+fn skip_ascii_whitespace_bytes_fast<F>(bytes: &[u8], mut i: usize, callback: &mut F) -> usize 
 where
     F: FnMut(Range<usize>, Result<u32, EscapeError>),
 {
-    while i < bytes.len() {
-        match bytes[i] {
-            b' ' | b'\t' => i += 1,
+    let len = bytes.len();
+    
+    while i < len {
+        // SAFETY: i < len is checked above
+        match unsafe { *bytes.get_unchecked(i) } {
+            b' ' | b'\t' => {
+                // Skip consecutive spaces/tabs in one go
+                while i < len {
+                    match unsafe { *bytes.get_unchecked(i) } {
+                        b' ' | b'\t' => i += 1,
+                        _ => break,
+                    }
+                }
+            },
             b'\n' => {
                 callback(i..i + 1, Err(EscapeError::CannotSkipMultipleLines));
                 i += 1;
             },
-            b'\r' if i + 1 < bytes.len() && bytes[i + 1] == b'\n' => {
-                callback(i..i + 2, Err(EscapeError::CannotSkipMultipleLines));
-                i += 2;
+            b'\r' => {
+                // Check for \r\n
+                if i + 1 < len && unsafe { *bytes.get_unchecked(i + 1) } == b'\n' {
+                    callback(i..i + 2, Err(EscapeError::CannotSkipMultipleLines));
+                    i += 2;
+                } else {
+                    callback(i..i + 1, Err(EscapeError::BareCarriageReturn));
+                    i += 1;
+                }
             },
             _ => break,
         }
@@ -309,76 +389,7 @@ where
 }
 
 
-// fn unescape_str<F>(src: &str, is_unicode: bool, mut callback: F)
-// where
-//     F: FnMut(Range<usize>, Result<u32, EscapeError>),
-// {
-//     let mut chars = src.chars();
-//     // The `start` and `end` computation here is complicated because
-//     // `skip_ascii_whitespace` makes us to skip over chars without counting
-//     // them in the range computation.
-//     while let Some(c) = chars.next() {
-//         let start = src.len() - chars.as_str().len() - c.len_utf8();
-//         let res = match c {
-//             '\\' => match chars.clone().next() {
-//                 Some('\r') if chars.clone().nth(1) == Some('\n') => {
-//                     // +2 for the '\\' and '\r' characters.
-//                     skip_ascii_whitespace(&mut chars, start + 2, &mut callback);
-//                     continue;
-//                 }
-//                 Some('\n') => {
-//                     // +1 for the '\\' character.
-//                     skip_ascii_whitespace(&mut chars, start + 1, &mut callback);
-//                     continue;
-//                 }
-//                 _ => scan_escape(&mut chars),
-//             },
-//             '\n' => Err(EscapeError::StrNewline),
-//             '\r' => {
-//                 if chars.clone().next() == Some('\n') {
-//                     continue;
-//                 }
-//                 Err(EscapeError::BareCarriageReturn)
-//             }
-//             c if !is_unicode && !c.is_ascii() => Err(EscapeError::StrNonAsciiChar),
-//             c => Ok(c as u32),
-//         };
-//         let end = src.len() - chars.as_str().len();
-//         callback(start..end, res);
-//     }
-// }
 
-// /// Skips over whitespace after a "\\\n" escape sequence.
-// ///
-// /// Reports errors if multiple newlines are encountered.
-// fn skip_ascii_whitespace<F>(chars: &mut Chars<'_>, mut start: usize, callback: &mut F)
-// where
-//     F: FnMut(Range<usize>, Result<u32, EscapeError>),
-// {
-//     // Skip the first newline.
-//     let mut nl = chars.next();
-//     if let Some('\r') = nl {
-//         nl = chars.next();
-//     }
-//     debug_assert_eq!(nl, Some('\n'));
-//     let mut tail = chars.as_str();
-//     start += 1;
-
-//     while tail.starts_with(|c: char| c.is_ascii_whitespace()) {
-//         let first_non_space =
-//             tail.bytes().position(|b| !matches!(b, b' ' | b'\t')).unwrap_or(tail.len());
-//         tail = &tail[first_non_space..];
-//         start += first_non_space;
-
-//         if let Some(tail2) = tail.strip_prefix('\n').or_else(|| tail.strip_prefix("\r\n")) {
-//             let skipped = tail.len() - tail2.len();
-//             tail = tail2;
-//             callback(start..start + skipped, Err(EscapeError::CannotSkipMultipleLines));
-//             start += skipped;
-//         }
-//     }
-//     *chars = tail.chars();
-// }
 
 /// Unescape characters in a hex string literal.
 ///
