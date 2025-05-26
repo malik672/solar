@@ -458,11 +458,21 @@ impl<'a> Cursor<'a> {
     fn bump_inlined(&mut self) {
         // NOTE: This intentionally does not assign `_c` in the next line, as rustc currently emit a
         // lot more LLVM IR (for an `assume`), which messes with the optimizations and inling costs.
-        #[cfg(not(debug_assertions))]
-        self.chars.next();
+        // #[cfg(not(debug_assertions))]
+        let bytes = self.as_str().as_bytes();
+
+        let byte = bytes[0];
         #[cfg(debug_assertions)]
-        if let Some(c) = self.chars.next() {
-            self.prev = c as u8;
+        {
+            self.prev = byte;
+        }
+
+        // Fast path for ASCII (most common case)
+        if byte.is_ascii() {
+            self.chars = unsafe { self.as_str().get_unchecked(1..) }.chars();
+        } else {
+            // Fallback for non-ASCII
+            self.chars.next();
         }
     }
 
