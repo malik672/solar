@@ -459,7 +459,8 @@ impl<'a> Cursor<'a> {
         // NOTE: This intentionally does not assign `_c` in the next line, as rustc currently emit a
         // lot more LLVM IR (for an `assume`), which messes with the optimizations and inling costs.
         // #[cfg(not(debug_assertions))]
-        let bytes = self.as_str().as_bytes();
+        let s = self.as_str();
+        let bytes = s.as_bytes();
         if !bytes.is_empty() {
             let byte = bytes[0];
             #[cfg(debug_assertions)]
