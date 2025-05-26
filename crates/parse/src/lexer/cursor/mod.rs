@@ -456,9 +456,9 @@ impl<'a> Cursor<'a> {
 
     // #[inline]
     // fn bump_inlined(&mut self) {
-    //     // NOTE: This intentionally does not assign `_c` in the next line, as rustc currently emit a
-    //     // lot more LLVM IR (for an `assume`), which messes with the optimizations and inling costs.
-    //     // #[cfg(not(debug_assertions))]
+    //     // NOTE: This intentionally does not assign `_c` in the next line, as rustc currently
+    // emit a     // lot more LLVM IR (for an `assume`), which messes with the optimizations and
+    // inling costs.     // #[cfg(not(debug_assertions))]
     //     let s = self.as_str();
     //     let bytes = s.as_bytes();
     //     if !bytes.is_empty() {
@@ -478,34 +478,39 @@ impl<'a> Cursor<'a> {
     //     }
     // }
 
+    #[inline]
+    fn bump_inlined(&mut self) {
+        // Get raw pointer access to the string data
+        let slice = self.chars.as_str();
+        let start = slice.as_ptr();
+        let len = slice.len();
 
-#[inline]
-fn bump_inlined(&mut self) {
-    let bytes = self.as_str().as_bytes();
-    
-    // Early return for empty case
-    if bytes.is_empty() {
-        return;
-    }
-    
-    let byte = unsafe { *bytes.get_unchecked(0) };
-    
-    #[cfg(debug_assertions)]
-    {
-        self.prev = byte;
-    }
+        if len == 0 {
+            return;
+        }
 
-    // Branchless ASCII check: byte < 128 is equivalent to (byte & 0x80) == 0
-    if (byte & 0x80) == 0 {
-        // ASCII fast path - direct slice manipulation
-        self.chars = unsafe { 
-            std::str::from_utf8_unchecked(bytes.get_unchecked(1..))
-        }.chars();
-    } else {
-        // Non-ASCII path - let the iterator handle UTF-8 decoding
-        self.chars.next();
+        // Load byte with potential for post-increment optimization
+        let byte = unsafe { *start };
+
+        #[cfg(debug_assertions)]
+        {
+            self.prev = byte;
+        }
+
+        // Calculate new position - always advance by 1 for ASCII fast path
+        let new_start = unsafe { start.add(1) };
+        let new_len = len - 1;
+
+        // Rebuild iterator from new position
+        if new_len > 0 {
+            let new_slice = unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(new_start, new_len))
+            };
+            self.chars = new_slice.chars();
+        } else {
+            self.chars = "".chars();
+        }
     }
-}
 
     /// Advances `n` bytes, without setting `prev`.
     #[inline]
