@@ -481,7 +481,7 @@ impl<'a> Cursor<'a> {
 fn bump_inlined(&mut self) {
     unsafe {
         let s = self.as_str();
-        if std::intrinsics::likely(!s.is_empty()) {
+        if !s.is_empty() {
             let ptr = s.as_ptr();
             let byte = *ptr;
             
