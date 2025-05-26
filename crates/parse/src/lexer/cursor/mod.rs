@@ -454,66 +454,28 @@ impl<'a> Cursor<'a> {
         c
     }
 
-    // #[inline]
-    // fn bump_inlined(&mut self) {
-    //     // NOTE: This intentionally does not assign `_c` in the next line, as rustc currently
-    // emit a     // lot more LLVM IR (for an `assume`), which messes with the optimizations and
-    // inling costs.     // #[cfg(not(debug_assertions))]
-    //     let bytes = self.as_str().as_bytes();
-
-    //         let byte = bytes[0];
-    //         #[cfg(debug_assertions)]
-    //         {
-    //             self.prev = byte;
-    //         }
-
-    //         // Fast path for ASCII (most common case)
-    //         if byte.is_ascii() {
-    //             self.chars = unsafe { self.as_str().get_unchecked(1..) }.chars();
-    //         } else {
-    //             // Fallback for non-ASCII
-    //             self.chars.next();
-    //         }
-
-    // }
-
     #[inline]
-fn bump_inlined(&mut self) {
-    unsafe {
-        let s = self.as_str();
-        if !s.is_empty() {
-            let ptr = s.as_ptr();
-            let byte = *ptr;
-            
+    fn bump_inlined(&mut self) {
+        // NOTE: This intentionally does not assign `_c` in the next line, as rustc currently emit a
+        // lot more LLVM IR (for an `assume`), which messes with the optimizations and inling costs.
+        // #[cfg(not(debug_assertions))]
+        let bytes = self.as_str().as_bytes();
+        if !bytes.is_empty() {
+            let byte = bytes[0];
             #[cfg(debug_assertions)]
             {
                 self.prev = byte;
             }
-            
+
+            // Fast path for ASCII (most common case)
             if byte < 128 {
-                // ASCII: 1 byte
-                self.chars = std::str::from_utf8_unchecked(
-                    std::slice::from_raw_parts(ptr.add(1), s.len() - 1)
-                ).chars();
-            } else if byte < 0xE0 {
-                // 2-byte UTF-8 sequence
-                self.chars = std::str::from_utf8_unchecked(
-                    std::slice::from_raw_parts(ptr.add(2), s.len() - 2)
-                ).chars();
-            } else if byte < 0xF0 {
-                // 3-byte UTF-8 sequence  
-                self.chars = std::str::from_utf8_unchecked(
-                    std::slice::from_raw_parts(ptr.add(3), s.len() - 3)
-                ).chars();
+                self.chars = unsafe { self.as_str().get_unchecked(1..) }.chars();
             } else {
-                // 4-byte UTF-8 sequence
-                self.chars = std::str::from_utf8_unchecked(
-                    std::slice::from_raw_parts(ptr.add(4), s.len() - 4)
-                ).chars();
+                // Fallback for non-ASCII
+                self.chars.next();
             }
         }
     }
-}
 
     /// Advances `n` bytes, without setting `prev`.
     #[inline]
