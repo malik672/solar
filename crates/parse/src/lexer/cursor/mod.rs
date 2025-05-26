@@ -478,30 +478,42 @@ impl<'a> Cursor<'a> {
     // }
 
     #[inline]
-    fn bump_inlined(&mut self) {
+fn bump_inlined(&mut self) {
+    unsafe {
         let s = self.as_str();
-        if !s.is_empty() {
-            unsafe {
-                let ptr = s.as_ptr();
-                let byte = *ptr; // Direct pointer access
-
-                #[cfg(debug_assertions)]
-                {
-                    self.prev = byte;
-                }
-
-                if byte.is_ascii() {
-                    self.chars = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                        ptr.add(1),
-                        s.len() - 1,
-                    ))
-                    .chars();
-                } else {
-                    self.chars.next();
-                }
+        if std::intrinsics::likely(!s.is_empty()) {
+            let ptr = s.as_ptr();
+            let byte = *ptr;
+            
+            #[cfg(debug_assertions)]
+            {
+                self.prev = byte;
+            }
+            
+            if byte < 128 {
+                // ASCII: 1 byte
+                self.chars = std::str::from_utf8_unchecked(
+                    std::slice::from_raw_parts(ptr.add(1), s.len() - 1)
+                ).chars();
+            } else if byte < 0xE0 {
+                // 2-byte UTF-8 sequence
+                self.chars = std::str::from_utf8_unchecked(
+                    std::slice::from_raw_parts(ptr.add(2), s.len() - 2)
+                ).chars();
+            } else if byte < 0xF0 {
+                // 3-byte UTF-8 sequence  
+                self.chars = std::str::from_utf8_unchecked(
+                    std::slice::from_raw_parts(ptr.add(3), s.len() - 3)
+                ).chars();
+            } else {
+                // 4-byte UTF-8 sequence
+                self.chars = std::str::from_utf8_unchecked(
+                    std::slice::from_raw_parts(ptr.add(4), s.len() - 4)
+                ).chars();
             }
         }
     }
+}
 
     /// Advances `n` bytes, without setting `prev`.
     #[inline]
