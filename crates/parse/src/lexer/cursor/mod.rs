@@ -475,22 +475,15 @@ impl<'a> Cursor<'a> {
             the road. **/
             let advance = if byte < 128 {
                 1
-            } else {
+            } else if bytes < 0xE0 {
                 // Manual UTF-8 length calculation
-                if byte < 0xE0 {
-                    2
-                } else if byte < 0xF0 {
-                    3
-                } else {
-                    4
-                }
+                2
+            } else if byte < 0xF0 {
+                3
+            } else {
+                4
             };
-
-            #[cfg(debug_assertions)]
-            if s.len() < advance {
-                panic!("Truncated UTF-8 character: len = {}, advance = {}", s.len(), advance);
-            }
-
+      
             // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid
             // `str`
             self.chars = unsafe { s.get_unchecked(advance..) }.chars();
