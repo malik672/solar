@@ -475,7 +475,7 @@ impl<'a> Cursor<'a> {
             the road. **/
             let advance = if byte < 128 {
                 1
-            } else if bytes < 0xE0 {
+            } else if byte < 0xE0 {
                 // Manual UTF-8 length calculation
                 2
             } else if byte < 0xF0 {
