@@ -454,7 +454,6 @@ impl<'a> Cursor<'a> {
         c
     }
 
-
     #[inline]
     fn bump_inlined(&mut self) {
         //UTF-8 Guarantee
@@ -492,11 +491,11 @@ impl<'a> Cursor<'a> {
                 panic!("Truncated UTF-8 character: len = {}, advance = {}", s.len(), advance);
             }
 
-            // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid `str`
+            // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid
+            // `str`
             self.chars = unsafe { s.get_unchecked(advance..) }.chars();
         }
     }
-
 
     /// Advances `n` bytes, without setting `prev`.
     #[inline]
