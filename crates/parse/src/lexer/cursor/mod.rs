@@ -477,38 +477,30 @@ impl<'a> Cursor<'a> {
     //         }
     //     }
     // }
-
     #[inline]
     fn bump_inlined(&mut self) {
-        // Get raw pointer access to the string data
-        let slice = self.chars.as_str();
-        let start = slice.as_ptr();
-        let len = slice.len();
+        // Skip ALL iterator logic and work with raw string slices
+        let current = self.chars.as_str();
+        if !current.is_empty() {
+            let byte = current.as_bytes()[0];
 
-        if len == 0 {
-            return;
-        }
+            #[cfg(debug_assertions)]
+            {
+                self.prev = byte;
+            }
 
-        // Load byte with potential for post-increment optimization
-        let byte = unsafe { *start };
-
-        #[cfg(debug_assertions)]
-        {
-            self.prev = byte;
-        }
-
-        // Calculate new position - always advance by 1 for ASCII fast path
-        let new_start = unsafe { start.add(1) };
-        let new_len = len - 1;
-
-        // Rebuild iterator from new position
-        if new_len > 0 {
-            let new_slice = unsafe {
-                std::str::from_utf8_unchecked(std::slice::from_raw_parts(new_start, new_len))
-            };
-            self.chars = new_slice.chars();
-        } else {
-            self.chars = "".chars();
+            // Manually reconstruct the iterator from scratch
+            self.chars = unsafe {
+                current.get_unchecked(
+                    if byte < 128 {
+                        1
+                    } else {
+                        // Manually decode UTF-8 to get char length
+                        char::from(byte).len_utf8()
+                    }..,
+                )
+            }
+            .chars();
         }
     }
 
