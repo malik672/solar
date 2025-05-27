@@ -475,13 +475,8 @@ impl<'a> Cursor<'a> {
             the road. **/
             let advance = if byte < 128 {
                 1
-            } else if byte < 0xE0 {
-                // Manual UTF-8 length calculation
-                2
-            } else if byte < 0xF0 {
-                3
             } else {
-                4
+                 ((byte as u32).leading_zeros() ^ 31) as usize
             };
       
             // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid
