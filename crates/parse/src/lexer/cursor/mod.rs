@@ -456,33 +456,22 @@ impl<'a> Cursor<'a> {
 
     #[inline]
     fn bump_inlined(&mut self) {
-        //UTF-8 Guarantee
         let s = self.chars.as_str();
-        if !s.is_empty() {
-            let byte = s.as_bytes()[0];
-
-            #[cfg(debug_assertions)]
-            {
-                self.prev = byte;
-            }
-
-            // Skip the Chars iterator completely - work with byte offsets
-
-            /** SAFETY: From the str library documentation: Rust libraries may assume that string slices are
-            always valid UTF-8. Constructing a non-UTF-8 string slice is not immediate undefined
-            behavior, but any function called on a string slice may assume that it is valid
-            UTF-8, which means that a non-UTF-8 string slice can lead to undefined behavior down
-            the road. **/
-            let advance = if byte < 128 {
-                1
-            } else {
-                 ((byte as u32).leading_zeros() ^ 31) as usize
-            };
-      
-            // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid
-            // `str`
-            self.chars = unsafe { s.get_unchecked(advance..) }.chars();
+        if s.is_empty() {
+            return;
         }
+
+        let byte = s.as_bytes()[0];
+
+        #[cfg(debug_assertions)]
+        {
+            self.prev = byte;
+        }
+
+        let advance =
+            1 + (byte >= 0xC0) as usize + (byte >= 0xE0) as usize + (byte >= 0xF0) as usize;
+
+        self.chars = unsafe { s.get_unchecked(advance..) }.chars();
     }
 
     /// Advances `n` bytes, without setting `prev`.
