@@ -479,28 +479,30 @@ impl<'a> Cursor<'a> {
     // }
     #[inline]
     fn bump_inlined(&mut self) {
-        // Skip ALL iterator logic and work with raw string slices
-        let current = self.chars.as_str();
-        if !current.is_empty() {
-            let byte = current.as_bytes()[0];
+        let s = self.chars.as_str();
+        if !s.is_empty() {
+            let byte = s.as_bytes()[0];
 
             #[cfg(debug_assertions)]
             {
                 self.prev = byte;
             }
 
-            // Manually reconstruct the iterator from scratch
-            self.chars = unsafe {
-                current.get_unchecked(
-                    if byte < 128 {
-                        1
-                    } else {
-                        // Manually decode UTF-8 to get char length
-                        char::from(byte).len_utf8()
-                    }..,
-                )
-            }
-            .chars();
+            // Skip the Chars iterator completely - work with byte offsets
+            let advance = if byte < 128 {
+                1
+            } else {
+                // Manual UTF-8 length calculation
+                if byte < 0xE0 {
+                    2
+                } else if byte < 0xF0 {
+                    3
+                } else {
+                    4
+                }
+            };
+
+            self.chars = unsafe { s.get_unchecked(advance..) }.chars();
         }
     }
 
