@@ -454,17 +454,49 @@ impl<'a> Cursor<'a> {
         c
     }
 
+
     #[inline]
     fn bump_inlined(&mut self) {
-        // NOTE: This intentionally does not assign `_c` in the next line, as rustc currently emit a
-        // lot more LLVM IR (for an `assume`), which messes with the optimizations and inling costs.
-        #[cfg(not(debug_assertions))]
-        self.chars.next();
-        #[cfg(debug_assertions)]
-        if let Some(c) = self.chars.next() {
-            self.prev = c as u8;
+        //UTF-8 Guarantee
+        let s = self.chars.as_str();
+        if !s.is_empty() {
+            let byte = s.as_bytes()[0];
+
+            #[cfg(debug_assertions)]
+            {
+                self.prev = byte;
+            }
+
+            // Skip the Chars iterator completely - work with byte offsets
+
+            /** SAFETY: From the str library documentation: Rust libraries may assume that string slices are
+            always valid UTF-8. Constructing a non-UTF-8 string slice is not immediate undefined
+            behavior, but any function called on a string slice may assume that it is valid
+            UTF-8, which means that a non-UTF-8 string slice can lead to undefined behavior down
+            the road. **/
+            let advance = if byte < 128 {
+                1
+            } else {
+                // Manual UTF-8 length calculation
+                if byte < 0xE0 {
+                    2
+                } else if byte < 0xF0 {
+                    3
+                } else {
+                    4
+                }
+            };
+
+            #[cfg(debug_assertions)]
+            if s.len() < advance {
+                panic!("Truncated UTF-8 character: len = {}, advance = {}", s.len(), advance);
+            }
+
+            // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid `str`
+            self.chars = unsafe { s.get_unchecked(advance..) }.chars();
         }
     }
+
 
     /// Advances `n` bytes, without setting `prev`.
     #[inline]
