@@ -13,6 +13,18 @@ use token::{RawLiteralKind, RawToken, RawTokenKind};
 #[cfg(test)]
 mod tests;
 
+static WHITESPACE_TABLE: [bool; 256] = {
+    let mut table = [false; 256];
+    table[b' ' as usize] = true;
+    table[b'\t' as usize] = true;
+    table[b'\n' as usize] = true;
+    table[b'\r' as usize] = true;
+    table
+};
+
+
+
+
 /// Returns `true` if the given character is considered a whitespace.
 #[inline]
 pub const fn is_whitespace(c: char) -> bool {
@@ -21,7 +33,8 @@ pub const fn is_whitespace(c: char) -> bool {
 /// Returns `true` if the given character is considered a whitespace.
 #[inline]
 pub const fn is_whitespace_byte(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | b'\r')
+    // matches!(c, b' ' | b'\t' | b'\n' | b'\r')
+    WHITESPACE_TABLE[c as usize]
 }
 
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
@@ -426,18 +439,11 @@ impl<'a> Cursor<'a> {
         self.peek_byte(1)
     }
 
+    // Do not use directly.
     #[doc(hidden)]
     #[inline]
     fn peek_byte(&self, index: usize) -> u8 {
-        let ptr = self.bytes.as_slice().as_ptr();
-        let len = self.bytes.as_slice().len();
-        unsafe {
-            if index < len {
-                *ptr.add(index)
-            } else {
-                EOF
-            }
-        }
+        self.as_bytes().get(index).copied().unwrap_or(EOF)
     }
 
     /// Checks if there is nothing more to consume.
