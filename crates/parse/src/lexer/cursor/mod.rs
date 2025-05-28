@@ -456,22 +456,50 @@ impl<'a> Cursor<'a> {
 
     #[inline]
     fn bump_inlined(&mut self) {
+        //UTF-8 Guarantee
         let s = self.chars.as_str();
-        if s.is_empty() {
-            return;
+        if !s.is_empty() {
+            let byte = s.as_bytes()[0];
+
+            #[cfg(debug_assertions)]
+            {
+                self.prev = byte;
+            }
+
+            // Skip the Chars iterator completely - work with byte offsets
+
+            /** SAFETY: From the str library documentation: Rust libraries may assume that string slices are
+            always valid UTF-8. Constructing a non-UTF-8 string slice is not immediate undefined
+            behavior, but any function called on a string slice may assume that it is valid
+            UTF-8, which means that a non-UTF-8 string slice can lead to undefined behavior down
+            the road. **/
+            static UTF8_LENGTHS: [u8; 256] = {
+                let mut table = [1u8; 256];
+                let mut i = 0xC0;
+                while i < 0xE0 {
+                    table[i] = 2;
+                    i += 1;
+                }
+                i = 0xE0;
+                while i < 0xF0 {
+                    table[i] = 3;
+                    i += 1;
+                }
+                i = 0xF0;
+                while i < 0x100 {
+                    table[i] = 4;
+                    i += 1;
+                }
+                table
+            };
+
+
+        let advance = UTF8_LENGTHS[byte as usize] as usize;
+
+            // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid
+            // `str`
+            self.chars = unsafe { s.get_unchecked(advance..) }.chars();
         }
-
-        let byte = s.as_bytes()[0];
-
-        #[cfg(debug_assertions)]
-        {
-            self.prev = byte;
-        }
-
-        let advance =
-            1 + (byte >= 0xC0) as usize + (byte >= 0xE0) as usize + (byte >= 0xF0) as usize;
-
-        self.chars = unsafe { s.get_unchecked(advance..) }.chars();
     }
 
     /// Advances `n` bytes, without setting `prev`.
