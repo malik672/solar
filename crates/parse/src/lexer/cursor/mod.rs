@@ -13,18 +13,6 @@ use token::{RawLiteralKind, RawToken, RawTokenKind};
 #[cfg(test)]
 mod tests;
 
-static WHITESPACE_TABLE: [bool; 256] = {
-    let mut table = [false; 256];
-    table[b' ' as usize] = true;
-    table[b'\t' as usize] = true;
-    table[b'\n' as usize] = true;
-    table[b'\r' as usize] = true;
-    table
-};
-
-
-
-
 /// Returns `true` if the given character is considered a whitespace.
 #[inline]
 pub const fn is_whitespace(c: char) -> bool {
@@ -34,7 +22,9 @@ pub const fn is_whitespace(c: char) -> bool {
 #[inline]
 pub const fn is_whitespace_byte(c: u8) -> bool {
     // matches!(c, b' ' | b'\t' | b'\n' | b'\r')
-    WHITESPACE_TABLE[c as usize]
+    
+    (1u64 << (c & 63)) & 0x100002600 
+        != 0
 }
 
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
