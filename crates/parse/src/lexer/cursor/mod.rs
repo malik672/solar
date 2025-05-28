@@ -329,32 +329,19 @@ impl<'a> Cursor<'a> {
     /// Eats a string until the given quote character. Returns `true` if the string was terminated.
     fn eat_string(&mut self, quote: u8) -> bool {
         debug_assert_eq!(self.prev(), quote);
-
-        let bytes = self.as_bytes();
-        let mut pos = 0;
-
-        while pos < bytes.len() {
-            match memchr::memchr2(quote, b'\\', &bytes[pos..]) {
-                Some(found_pos) => {
-                    let actual_pos = pos + found_pos;
-                    if bytes[actual_pos] == quote {
-                        self.ignore_bytes(actual_pos + 1);
-                        return true;
-                    } else {
-                        pos = actual_pos + 1;
-                        if pos < bytes.len() {
-                            pos += 1;
-                        }
-                    }
-                }
-                None => {
-                    // No more quotes or backslashes - string not terminated
-                    self.ignore_bytes(bytes.len());
-                    return false;
+        while let Some(c) = self.bump_ret() {
+            if c == quote {
+                return true;
+            }
+            if c == b'\\' {
+                let first = self.first();
+                if first == b'\\' || first == quote {
+                    // Bump again to skip escaped character.
+                    self.bump();
                 }
             }
         }
-
+        // End of file reached.
         false
     }
 
@@ -439,11 +426,15 @@ impl<'a> Cursor<'a> {
         self.peek_byte(1)
     }
 
-    // Do not use directly.
     #[doc(hidden)]
     #[inline]
     fn peek_byte(&self, index: usize) -> u8 {
-        self.as_bytes().get(index).copied().unwrap_or(EOF)
+        let slice = self.bytes.as_slice();
+        if index < slice.len() {
+            unsafe { *slice.get_unchecked(index) }
+        } else {
+            EOF
+        }
     }
 
     /// Checks if there is nothing more to consume.
