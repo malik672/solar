@@ -456,49 +456,23 @@ impl<'a> Cursor<'a> {
 
     #[inline]
     fn bump_inlined(&mut self) {
-        //UTF-8 Guarantee
         let s = self.chars.as_str();
-        if !s.is_empty() {
-            let byte = s.as_bytes()[0];
+        let len = s.len();
+
+        if len != 0 {
+            let ptr = s.as_ptr();
+
+            let byte = unsafe { *ptr };
 
             #[cfg(debug_assertions)]
             {
                 self.prev = byte;
             }
 
-            // Skip the Chars iterator completely - work with byte offsets
+            let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(1), len - 1) };
+            let new_str = unsafe { std::str::from_utf8_unchecked(new_slice) };
 
-            /** SAFETY: From the str library documentation: Rust libraries may assume that string slices are
-            always valid UTF-8. Constructing a non-UTF-8 string slice is not immediate undefined
-            behavior, but any function called on a string slice may assume that it is valid
-            UTF-8, which means that a non-UTF-8 string slice can lead to undefined behavior down
-            the road. **/
-            static UTF8_LENGTHS: [u8; 256] = {
-                let mut table = [1u8; 256];
-                let mut i = 0xC0;
-                while i < 0xE0 {
-                    table[i] = 2;
-                    i += 1;
-                }
-                i = 0xE0;
-                while i < 0xF0 {
-                    table[i] = 3;
-                    i += 1;
-                }
-                i = 0xF0;
-                while i < 0x100 {
-                    table[i] = 4;
-                    i += 1;
-                }
-                table
-            };
-
-
-        let advance = UTF8_LENGTHS[byte as usize] as usize;
-
-            // SAFETY: `advance` is guaranteed to be within bounds of `s`, because s is a valid
-            // `str`
-            self.chars = unsafe { s.get_unchecked(advance..) }.chars();
+            self.chars = new_str.chars();
         }
     }
 
