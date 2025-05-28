@@ -13,6 +13,29 @@ use token::{RawLiteralKind, RawToken, RawTokenKind};
 #[cfg(test)]
 mod tests;
 
+static ASCII_TABLE: [u8; 256] = {
+    let mut table = [0; 256];
+    // Whitespace: space, tab, newline, carriage return
+    table[b' ' as usize] |= 1 << 0;
+    table[b'\t' as usize] |= 1 << 0;
+    table[b'\n' as usize] |= 1 << 0;
+    table[b'\r' as usize] |= 1 << 0;
+    // Identifier start: a-z, A-Z, _, $
+    table[b'a' as usize..=b'z' as usize].fill(1 << 1);
+    table[b'A' as usize..=b'Z' as usize].fill(1 << 1);
+    table[b'_' as usize] |= 1 << 1;
+    table[b'$' as usize] |= 1 << 1;
+    // Identifier continue: a-z, A-Z, 0-9, _, $
+    table[b'a' as usize..=b'z' as usize].fill(1 << 2);
+    table[b'A' as usize..=b'Z' as usize].fill(1 << 2);
+    table[b'0' as usize..=b'9' as usize].fill(1 << 2);
+    table[b'_' as usize] |= 1 << 2;
+    table[b'$' as usize] |= 1 << 2;
+    table
+};
+
+const IS_WHITESPACE: u8 = 1 << 0;
+
 /// Returns `true` if the given character is considered a whitespace.
 #[inline]
 pub const fn is_whitespace(c: char) -> bool {
@@ -20,9 +43,8 @@ pub const fn is_whitespace(c: char) -> bool {
 }
 /// Returns `true` if the given character is considered a whitespace.
 #[inline]
-pub const fn is_whitespace_byte(c: u8) -> bool {    
-   const BITMASK: u64 = (1 << 9) | (1 << 10) | (1 << 13) | (1 << 32);
-    c <= 32 && ((1 << c) & BITMASK) != 0
+pub const fn is_whitespace_byte(c: u8) -> bool {
+    ASCII_TABLE[c as usize] & IS_WHITESPACE != 0
 }
 
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
