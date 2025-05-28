@@ -455,7 +455,7 @@ impl<'a> Cursor<'a> {
     }
 
     #[inline]
-fn bump_inlined_beat_stdlib(&mut self) {
+fn bump_inlined(&mut self) {
     let s = self.chars.as_str();
     if s.is_empty() { return; }
     
@@ -468,7 +468,6 @@ fn bump_inlined_beat_stdlib(&mut self) {
     }
     
     // ASCII fast path - this is where we win big
-    // Stdlib always goes through the iterator, we do direct access
     if byte < 128 {
         // SAFETY: ASCII characters are always 1 byte
         self.chars = unsafe { s.get_unchecked(1..) }.chars();
