@@ -429,11 +429,14 @@ impl<'a> Cursor<'a> {
     #[doc(hidden)]
     #[inline]
     fn peek_byte(&self, index: usize) -> u8 {
-        let slice = self.bytes.as_slice();
-        if index < slice.len() {
-            unsafe { *slice.get_unchecked(index) }
-        } else {
-            EOF
+        let ptr = self.bytes.as_slice().as_ptr();
+        let len = self.bytes.as_slice().len();
+        unsafe {
+            if index < len {
+                *ptr.add(index)
+            } else {
+                EOF
+            }
         }
     }
 
