@@ -455,26 +455,27 @@ impl<'a> Cursor<'a> {
     }
 
     #[inline]
-    fn bump_inlined(&mut self) {
-        let s = self.chars.as_str();
-        let len = s.len();
-
-        if len != 0 {
-            let ptr = s.as_ptr();
-
-            let byte = unsafe { *ptr };
-
-            #[cfg(debug_assertions)]
-            {
-                self.prev = byte;
-            }
-
-            let new_slice = unsafe { std::slice::from_raw_parts(ptr.add(1), len - 1) };
-            let new_str = unsafe { std::str::from_utf8_unchecked(new_slice) };
-
-            self.chars = new_str.chars();
-        }
+fn bump_inlined_beat_stdlib(&mut self) {
+    let s = self.chars.as_str();
+    if s.is_empty() { return; }
+    
+    let bytes = s.as_bytes();
+    let byte = unsafe { *bytes.get_unchecked(0) };
+    
+    #[cfg(debug_assertions)]
+    {
+        self.prev = byte;
     }
+    
+    // ASCII fast path - this is where we win big
+    // Stdlib always goes through the iterator, we do direct access
+    if byte < 128 {
+        // SAFETY: ASCII characters are always 1 byte
+        self.chars = unsafe { s.get_unchecked(1..) }.chars();
+    } else {
+        let _ = self.chars.next();
+    }
+}
 
     /// Advances `n` bytes, without setting `prev`.
     #[inline]
