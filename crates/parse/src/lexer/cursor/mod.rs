@@ -32,7 +32,8 @@ pub const fn is_id_start(c: char) -> bool {
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
 #[inline]
 pub const fn is_id_start_byte(c: u8) -> bool {
-    matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$')
+    // matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$')
+    (c >= b'a' && c <= b'z') | (c >= b'A' && c <= b'Z') | (c == b'_') | (c == b'$')
 }
 
 /// Returns `true` if the given character is valid in a Solidity identifier.
@@ -43,7 +44,8 @@ pub const fn is_id_continue(c: char) -> bool {
 /// Returns `true` if the given character is valid in a Solidity identifier.
 #[inline]
 pub const fn is_id_continue_byte(c: u8) -> bool {
-    matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$')
+    // matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$')
+    (c >= b'a' && c <= b'z') | (c >= b'A' && c <= b'Z') | (c >= b'0' && c <= b'9') | (c == b'_') | (c == b'$')
 }
 
 /// Returns `true` if the given string is a valid Solidity identifier.
