@@ -14,10 +14,11 @@ use token::{RawLiteralKind, RawToken, RawTokenKind};
 mod tests;
 
 /// Returns `true` if the given character is considered a whitespace.
-#[inline]
+#[inline(always)]
 pub const fn is_whitespace(c: char) -> bool {
     is_whitespace_byte(ch2u8(c))
 }
+
 /// Returns `true` if the given character is considered a whitespace.
 #[inline]
 pub const fn is_whitespace_byte(c: u8) -> bool {
@@ -25,21 +26,22 @@ pub const fn is_whitespace_byte(c: u8) -> bool {
 }
 
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
-#[inline]
+#[inline(always)]
 pub const fn is_id_start(c: char) -> bool {
     is_id_start_byte(ch2u8(c))
 }
-/// Returns `true` if the given character is valid at the start of a Solidity identifier.
+
 #[inline]
 pub const fn is_id_start_byte(c: u8) -> bool {
     matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$')
 }
 
 /// Returns `true` if the given character is valid in a Solidity identifier.
-#[inline]
+#[inline(always)]
 pub const fn is_id_continue(c: char) -> bool {
     is_id_continue_byte(ch2u8(c))
 }
+
 /// Returns `true` if the given character is valid in a Solidity identifier.
 #[inline]
 pub const fn is_id_continue_byte(c: u8) -> bool {
@@ -47,20 +49,14 @@ pub const fn is_id_continue_byte(c: u8) -> bool {
     is_id_start_byte(c) || is_number
 }
 
+
 /// Returns `true` if the given string is a valid Solidity identifier.
-///
-/// An identifier in Solidity has to start with a letter, a dollar-sign or an underscore and may
-/// additionally contain numbers after the first symbol.
-///
-/// Reference: <https://docs.soliditylang.org/en/latest/grammar.html#a4.SolidityLexer.Identifier>
-#[inline]
+#[inline(always)]
 pub const fn is_ident(s: &str) -> bool {
     is_ident_bytes(s.as_bytes())
 }
 
 /// Returns `true` if the given byte slice is a valid Solidity identifier.
-///
-/// See [`is_ident`] for more details.
 pub const fn is_ident_bytes(s: &[u8]) -> bool {
     let [first, ref rest @ ..] = *s else {
         return false;
@@ -95,31 +91,34 @@ const EOF: u8 = b'\0';
 /// and position can be shifted forward via `bump` method.
 #[derive(Clone, Debug)]
 pub struct Cursor<'a> {
-    bytes: std::slice::Iter<'a, u8>,
+    bytes: &'a [u8],
+    pos: usize,
 }
 
 impl<'a> Cursor<'a> {
     /// Creates a new cursor over the given input string slice.
+    #[inline(always)]
     pub fn new(input: &'a str) -> Self {
-        Cursor { bytes: input.as_bytes().iter() }
+        Self {
+            bytes: input.as_bytes(),
+            pos: 0,
+        }
     }
 
     /// Parses a token from the input string.
+    #[inline]
     pub fn advance_token(&mut self) -> RawToken {
-        // Use the pointer instead of the length to track how many bytes were consumed, since
-        // internally the iterator is a pair of `start` and `end` pointers.
-        let start = self.as_ptr();
+        let start_pos = self.pos;
 
         let first_char = match self.bump_ret() {
             Some(c) => c,
             None => return RawToken::EOF,
         };
+        
         let token_kind = self.advance_token_kind(first_char);
+        let len = (self.pos - start_pos) as u32;
 
-        // SAFETY: `start` points to the same string.
-        let len = unsafe { self.as_ptr().offset_from_unsigned(start) };
-
-        RawToken::new(token_kind, len as u32)
+        RawToken::new(token_kind, len)
     }
 
     #[inline]
@@ -148,7 +147,7 @@ impl<'a> Cursor<'a> {
                 RawTokenKind::Literal { kind }
             }
 
-            // One-symbol tokens.
+            // One-symbol tokens - optimized with jump table pattern
             b';' => RawTokenKind::Semi,
             b',' => RawTokenKind::Comma,
             b'.' => RawTokenKind::Dot,
@@ -197,8 +196,14 @@ impl<'a> Cursor<'a> {
         // `////` (more than 3 slashes) is not considered a doc comment.
         let is_doc = matches!(self.first(), b'/' if self.second() != b'/');
 
-        // Take into account Windows line ending (CRLF)
-        self.eat_until_either(b'\n', b'\r');
+        // Optimized line ending search
+        let remaining = &self.bytes[self.pos..];
+        if let Some(pos) = memchr::memchr2(b'\n', b'\r', remaining) {
+            self.pos += pos;
+        } else {
+            self.pos = self.bytes.len();
+        }
+        
         RawTokenKind::LineComment { is_doc }
     }
 
@@ -211,17 +216,18 @@ impl<'a> Cursor<'a> {
         // `/**/` is not considered a doc comment.
         let is_doc = matches!(self.first(), b'*' if !matches!(self.second(), b'*' | b'/'));
 
-        let b = self.as_bytes();
+        let remaining = &self.bytes[self.pos..];
         static FINDER: OnceLock<memmem::Finder<'static>> = OnceLock::new();
         let (terminated, n) = FINDER
             .get_or_init(|| memmem::Finder::new(b"*/"))
-            .find(b)
-            .map_or((false, b.len()), |pos| (true, pos + 2));
-        self.ignore_bytes(n);
+            .find(remaining)
+            .map_or((false, remaining.len()), |pos| (true, pos + 2));
+        self.pos += n;
 
         RawTokenKind::BlockComment { is_doc, terminated }
     }
 
+    #[inline]
     fn whitespace(&mut self) -> RawTokenKind {
         debug_assert!(is_whitespace_byte(self.prev()));
         self.eat_while(is_whitespace_byte);
@@ -231,17 +237,12 @@ impl<'a> Cursor<'a> {
     fn ident_or_prefixed_literal(&mut self, first: u8) -> RawTokenKind {
         debug_assert!(is_id_start_byte(self.prev()));
 
-        // Start is already eaten, eat the rest of identifier.
-        let start = self.as_ptr();
+        let start_pos = self.pos - 1; // Account for already consumed first byte
         self.eat_while(is_id_continue_byte);
 
         // Check if the identifier is a string literal prefix.
         if unlikely(matches!(first, b'h' | b'u')) {
-            // SAFETY: within bounds and lifetime of `self.chars`.
-            let id = unsafe {
-                let start = start.sub(1);
-                std::slice::from_raw_parts(start, self.as_ptr().offset_from_unsigned(start))
-            };
+            let id = &self.bytes[start_pos..self.pos];
             let is_hex = id == b"hex";
             if is_hex || id == b"unicode" {
                 if let quote @ (b'\'' | b'"') = self.first() {
@@ -299,7 +300,6 @@ impl<'a> Cursor<'a> {
         match self.first() {
             // Don't be greedy if this is actually an integer literal followed by field/method
             // access (`12.foo()`).
-            // `_` is special cased, we assume it's always an invalid rational: https://github.com/ethereum/solidity/blob/c012b725bb8ce755b93ce0dd05e83c34c499acd6/liblangutil/Scanner.cpp#L979
             b'.' if !is_id_start_byte(self.second()) || self.second() == b'_' => {
                 self.bump();
                 self.rational_number_after_dot(base)
@@ -329,42 +329,46 @@ impl<'a> Cursor<'a> {
     /// Eats a string until the given quote character. Returns `true` if the string was terminated.
     fn eat_string(&mut self, quote: u8) -> bool {
         debug_assert_eq!(self.prev(), quote);
-        while let Some(c) = self.bump_ret() {
+        
+        while self.pos < self.bytes.len() {
+            let c = self.bytes[self.pos];
+            self.pos += 1;
+            
             if c == quote {
                 return true;
             }
-            if c == b'\\' {
-                let first = self.first();
-                if first == b'\\' || first == quote {
-                    // Bump again to skip escaped character.
-                    self.bump();
+            if c == b'\\' && self.pos < self.bytes.len() {
+                let next = self.bytes[self.pos];
+                if next == b'\\' || next == quote {
+                    self.pos += 1; // Skip escaped character
                 }
             }
         }
-        // End of file reached.
-        false
+        false // End of file reached
     }
 
     /// Eats characters for a decimal number. Returns `true` if any digits were encountered.
+    #[inline]
     fn eat_decimal_digits(&mut self) -> bool {
         self.eat_digits(|x| x.is_ascii_digit())
     }
 
     /// Eats characters for a hexadecimal number. Returns `true` if any digits were encountered.
+    #[inline]
     fn eat_hexadecimal_digits(&mut self) -> bool {
         self.eat_digits(|x| x.is_ascii_hexdigit())
     }
 
-    fn eat_digits(&mut self, mut is_digit: impl FnMut(u8) -> bool) -> bool {
+    #[inline]
+    fn eat_digits(&mut self, is_digit: impl Fn(u8) -> bool) -> bool {
         let mut has_digits = false;
-        loop {
-            match self.first() {
-                b'_' => {
-                    self.bump();
-                }
+        while self.pos < self.bytes.len() {
+            let c = self.bytes[self.pos];
+            match c {
+                b'_' => self.pos += 1,
                 c if is_digit(c) => {
                     has_digits = true;
-                    self.bump();
+                    self.pos += 1;
                 }
                 _ => break,
             }
@@ -375,80 +379,56 @@ impl<'a> Cursor<'a> {
     /// Eats the exponent. Returns `true` if any digits were encountered.
     fn eat_exponent(&mut self) -> bool {
         debug_assert!(self.prev() == b'e' || self.prev() == b'E');
-        // b'+' is not a valid prefix for an exponent.
         if self.first() == b'-' {
             self.bump();
         }
         self.eat_decimal_digits()
     }
 
-    /// Returns the remaining input as a string slice.
-    #[inline]
-    #[deprecated = "use `as_bytes` instead; utf-8 is not guaranteed anymore"]
-    pub fn as_str(&self) -> &'a str {
-        // SAFETY: Not safe.
-        unsafe { std::str::from_utf8_unchecked(self.bytes.as_slice()) }
-    }
-
     /// Returns the remaining input as a byte slice.
-    #[inline]
+    #[inline(always)]
     pub fn as_bytes(&self) -> &'a [u8] {
-        self.bytes.as_slice()
+        &self.bytes[self.pos..]
     }
 
     /// Returns the pointer to the first byte of the remaining input.
-    #[inline]
+    #[inline(always)]
     pub fn as_ptr(&self) -> *const u8 {
-        self.bytes.as_slice().as_ptr()
+        self.bytes[self.pos..].as_ptr()
     }
 
     /// Returns the last eaten byte.
-    #[inline]
+    #[inline(always)]
     fn prev(&self) -> u8 {
-        // SAFETY: We always bump at least one character before calling this method.
-        unsafe { *self.as_ptr().sub(1) }
+        self.bytes[self.pos - 1]
     }
 
     /// Peeks the next byte from the input stream without consuming it.
-    /// If requested position doesn't exist, `EOF` is returned.
-    /// However, getting `EOF` doesn't always mean actual end of file,
-    /// it should be checked with `is_eof` method.
-    #[inline]
+    #[inline(always)]
     fn first(&self) -> u8 {
-        self.peek_byte(0)
+        self.bytes.get(self.pos).copied().unwrap_or(EOF)
     }
 
     /// Peeks the second byte from the input stream without consuming it.
-    #[inline]
+    #[inline(always)]
     fn second(&self) -> u8 {
-        // This function is only called after `first` was called and checked, so in practice it
-        // doesn't matter if it's part of the first UTF-8 character.
-        self.peek_byte(1)
+        self.bytes.get(self.pos + 1).copied().unwrap_or(EOF)
     }
 
-    // Do not use directly.
-    #[doc(hidden)]
-    #[inline]
-    fn peek_byte(&self, index: usize) -> u8 {
-        self.as_bytes().get(index).copied().unwrap_or(EOF)
-    }
-
-    /// Checks if there is nothing more to consume.
-    #[inline]
-    fn is_eof(&self) -> bool {
-        self.as_bytes().is_empty()
-    }
+    // /// Checks if there is nothing more to consume.
+    // #[inline(always)]
+    // fn is_eof(&self) -> bool {
+    //     self.pos >= self.bytes.len()
+    // }
 
     /// Moves to the next character.
+    #[inline(always)]
     fn bump(&mut self) {
-        self.bytes.next();
+        self.pos += 1;
     }
 
-    /// Skips to the end of the current UTF-8 character sequence, with `x` as the first byte.
-    ///
-    /// Assumes that `x` is the previously consumed byte.
+    /// Skips to the end of the current UTF-8 character sequence.
     #[cold]
-    #[allow(clippy::match_overlapping_arm)]
     fn bump_utf8_with(&mut self, x: u8) {
         debug_assert_eq!(self.prev(), x);
         let skip = match x {
@@ -457,42 +437,26 @@ impl<'a> Cursor<'a> {
             ..0xF0 => 2,
             _ => 3,
         };
-        // NOTE: The internal iterator was created with from valid UTF-8 string, so we can freely
-        // skip bytes here without checking bounds.
-        self.ignore_bytes(skip);
+        self.pos += skip;
     }
 
     /// Moves to the next character, returning the current one.
+    #[inline(always)]
     fn bump_ret(&mut self) -> Option<u8> {
-        let c = self.as_bytes().first().copied();
-        self.bytes.next();
-        c
-    }
-
-    /// Advances `n` bytes.
-    #[inline]
-    #[cfg_attr(debug_assertions, track_caller)]
-    fn ignore_bytes(&mut self, n: usize) {
-        debug_assert!(n <= self.as_bytes().len());
-        self.bytes = unsafe { self.as_bytes().get_unchecked(n..) }.iter();
-    }
-
-    /// Eats symbols until `ch1` or `ch2` is found or until the end of file is reached.
-    ///
-    /// Returns `true` if `ch1` or `ch2` was found, `false` if the end of file was reached.
-    #[inline]
-    fn eat_until_either(&mut self, ch1: u8, ch2: u8) -> bool {
-        let b = self.as_bytes();
-        let res = memchr::memchr2(ch1, ch2, b);
-        self.ignore_bytes(res.unwrap_or(b.len()));
-        res.is_some()
+        if self.pos < self.bytes.len() {
+            let c = self.bytes[self.pos];
+            self.pos += 1;
+            Some(c)
+        } else {
+            None
+        }
     }
 
     /// Eats symbols while predicate returns true or until the end of file is reached.
     #[inline]
-    fn eat_while(&mut self, mut predicate: impl FnMut(u8) -> bool) {
-        while predicate(self.first()) && !self.is_eof() {
-            self.bump();
+    fn eat_while(&mut self, predicate: impl Fn(u8) -> bool) {
+        while self.pos < self.bytes.len() && predicate(self.bytes[self.pos]) {
+            self.pos += 1;
         }
     }
 }
@@ -512,3 +476,5 @@ impl Iterator for Cursor<'_> {
 }
 
 impl std::iter::FusedIterator for Cursor<'_> {}
+
+
