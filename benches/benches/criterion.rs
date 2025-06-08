@@ -31,9 +31,9 @@ fn parser_benches(c: &mut Criterion) {
                         format!("{sname}/{pname}/{id}")
                     }
                 };
-                if parser.can_lex() {
-                    g.bench_function(mk_id("lex"), |b| b.iter(|| parser.lex(src)));
-                }
+                // if parser.can_lex() {
+                //     g.bench_function(mk_id("lex"), |b| b.iter(|| parser.lex(src)));
+                // }
                 g.bench_function(mk_id("parse"), |b| b.iter(|| parser.parse(src)));
             }
             eprintln!();
