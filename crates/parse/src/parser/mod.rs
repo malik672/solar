@@ -918,12 +918,24 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         self.parse_ident_common(true)
     }
 
-    /// Parses an identifier. Does not check if the identifier is a reserved keyword.
+    // /// Parses an identifier. Does not check if the identifier is a reserved keyword.
+    // #[track_caller]
+    // pub fn parse_ident_any(&mut self) -> PResult<'sess, Ident> {
+    //     let ident = self.ident_or_err(true)?;
+    //     self.bump();
+    //     Ok(ident)
+    // }
+
     #[track_caller]
     pub fn parse_ident_any(&mut self) -> PResult<'sess, Ident> {
-        let ident = self.ident_or_err(true)?;
-        self.bump();
-        Ok(ident)
+        // Fast path: directly check if current token is an identifier
+        if let Some(ident) = self.token.ident() {
+            self.bump();
+            Ok(ident)
+        } else {
+            // Slow path: handle error case
+            self.expected_ident_found_other(self.token, true)
+        }
     }
 
     /// Parses an optional identifier.
