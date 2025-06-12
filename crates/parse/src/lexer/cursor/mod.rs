@@ -125,20 +125,20 @@ impl<'a> Cursor<'a> {
     pub fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
         match first_char {
             // Slash, comment or block comment.
-            // b'/' => match self.first() {
-            //     b'/' => self.line_comment(),
-            //     b'*' => self.block_comment(),
-            //     _ => RawTokenKind::Slash,
-            // },
             b'/' => {
-                let first = self.first();
-                if first == b'/' {
-                    self.line_comment()
-                } else if first == b'*' {
-                    self.block_comment()
-                } else {
-                    RawTokenKind::Slash
+                 let next_char = self.first();
+
+
+                if next_char == b'/' {
+                    return self.line_comment(); // FIRST - can't be reordered
                 }
+                if next_char == b'*' {
+                    return self.block_comment(); // SECOND - can't
+                    
+                }
+
+                RawTokenKind::Slash
+                
             }
 
             // Whitespace sequence.
