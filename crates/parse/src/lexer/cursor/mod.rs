@@ -122,12 +122,8 @@ impl<'a> Cursor<'a> {
         RawToken::new(token_kind, len as u32)
     }
 
-    #[inline]
-    fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
+    pub fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
         match first_char {
-            // Identifier (this should be checked after other variant that can start as identifier).
-            c if is_id_start_byte(c) => self.ident_or_prefixed_literal(c),
-
             // Slash, comment or block comment.
             b'/' => match self.first() {
                 b'/' => self.line_comment(),
@@ -137,6 +133,9 @@ impl<'a> Cursor<'a> {
 
             // Whitespace sequence.
             c if is_whitespace_byte(c) => self.whitespace(),
+
+            // Identifier (this should be checked after other variant that can start as identifier).
+            c if is_id_start_byte(c) => self.ident_or_prefixed_literal(c),
 
             // Numeric literal.
             b'0'..=b'9' => {

@@ -45,7 +45,7 @@ impl Lit {
     pub fn first_span(&self) -> Span {
         if let LitKind::Str(kind, _, extra) = &self.kind {
             if !extra.is_empty() {
-                let str_len = kind.prefix().len() + 1 + self.symbol.as_str().len() + 1;
+                let str_len = kind.prefix().len() + self.symbol.as_str().len() + 2;
                 return self.span.with_hi(self.span.lo() + str_len as u32);
             }
         }
