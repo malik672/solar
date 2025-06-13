@@ -429,6 +429,7 @@ impl<'a> Cursor<'a> {
 
     // Do not use directly.
     #[doc(hidden)]
+    #[inline(never)]
     fn peek_byte(&self, index: usize) -> u8 {
         self.as_bytes().get(index).copied().unwrap_or(EOF)
     }
