@@ -195,7 +195,9 @@ impl<'a> Cursor<'a> {
         self.bump();
 
         // `////` (more than 3 slashes) is not considered a doc comment.
-        let is_doc = matches!(self.first(), b'/' if self.second() != b'/');
+        let second = self.second();
+        //safety: `first_unchecked` is safe here, because already load second
+        let is_doc = matches!(self.first_unchecked(), b'/' if second != b'/');
 
         // Take into account Windows line ending (CRLF)
         self.eat_until_either(b'\n', b'\r');
@@ -228,7 +230,6 @@ impl<'a> Cursor<'a> {
         RawTokenKind::Whitespace
     }
 
-    #[inline]
     fn ident_or_prefixed_literal(&mut self, first: u8) -> RawTokenKind {
         debug_assert!(is_id_start_byte(self.prev()));
 
@@ -419,6 +420,16 @@ impl<'a> Cursor<'a> {
         self.peek_byte(0)
     }
 
+
+    /// Peeks the next byte from the input stream without consuming it.
+    /// If requested position doesn't exist, `EOF` is returned.
+    /// However, getting `EOF` doesn't always mean actual end of file,
+    /// it should be checked with `is_eof` method.
+    #[inline(never)]
+    fn first_unchecked(&self) -> u8 {
+        self.peek_byte_unchecked(0)
+    }
+
     /// Peeks the second byte from the input stream without consuming it.
     #[inline]
     fn second(&self) -> u8 {
@@ -429,9 +440,16 @@ impl<'a> Cursor<'a> {
 
     // Do not use directly.
     #[doc(hidden)]
-    #[inline(never)]
+    #[inline]
     fn peek_byte(&self, index: usize) -> u8 {
         self.as_bytes().get(index).copied().unwrap_or(EOF)
+    }
+
+        // Do not use directly.
+    #[doc(hidden)]
+    #[inline(never)]
+    fn peek_byte_unchecked(&self, index: usize) -> u8 {
+        unsafe{ *(self.as_bytes().get_unchecked(index))}
     }
 
     /// Checks if there is nothing more to consume.
