@@ -122,24 +122,15 @@ impl<'a> Cursor<'a> {
         RawToken::new(token_kind, len as u32)
     }
 
-    pub fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
+    #[inline]
+    fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
         match first_char {
             // Slash, comment or block comment.
-            b'/' => {
-                 let next_char = self.first();
-
-
-                if next_char == b'/' {
-                    return self.line_comment(); // FIRST - can't be reordered
-                }
-                if next_char == b'*' {
-                    return self.block_comment(); // SECOND - can't
-                    
-                }
-
-                RawTokenKind::Slash
-                
-            }
+            b'/' => match self.first() {
+                b'/' => self.line_comment(),
+                b'*' => self.block_comment(),
+                _ => RawTokenKind::Slash,
+            },
 
             // Whitespace sequence.
             c if is_whitespace_byte(c) => self.whitespace(),
@@ -237,6 +228,7 @@ impl<'a> Cursor<'a> {
         RawTokenKind::Whitespace
     }
 
+    #[inline]
     fn ident_or_prefixed_literal(&mut self, first: u8) -> RawTokenKind {
         debug_assert!(is_id_start_byte(self.prev()));
 
@@ -437,7 +429,6 @@ impl<'a> Cursor<'a> {
 
     // Do not use directly.
     #[doc(hidden)]
-    #[inline]
     fn peek_byte(&self, index: usize) -> u8 {
         self.as_bytes().get(index).copied().unwrap_or(EOF)
     }
