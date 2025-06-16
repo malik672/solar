@@ -92,15 +92,13 @@ where
 {
     if needs_unescape(src, mode) {
         unescape_literal_unchecked(src, mode, callback)
+    } else if src.is_ascii() {
+        for (i, byte) in src.bytes().enumerate() {
+            callback(i..i + 1, Ok(byte as u32));
+        }
     } else {
-        if src.is_ascii() {
-            for (i, byte) in src.bytes().enumerate() {
-                callback(i..i + 1, Ok(byte as u32));
-            }
-        } else {
-            for (i, ch) in src.char_indices() {
-                callback(i..i + ch.len_utf8(), Ok(ch as u32));
-            }
+        for (i, ch) in src.char_indices() {
+            callback(i..i + ch.len_utf8(), Ok(ch as u32));
         }
     }
 }
