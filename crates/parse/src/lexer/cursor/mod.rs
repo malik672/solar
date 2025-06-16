@@ -6,29 +6,12 @@ use memchr::memmem;
 use solar_ast::{Base, StrKind};
 use solar_data_structures::hint::unlikely;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod token;
 use token::{RawLiteralKind, RawToken, RawTokenKind};
 
-static LOWERCASE_COUNT: AtomicU64 = AtomicU64::new(0);
-static UPPERCASE_COUNT: AtomicU64 = AtomicU64::new(0);
-static UNDERSCORE_COUNT: AtomicU64 = AtomicU64::new(0);
-static DOLLAR_COUNT: AtomicU64 = AtomicU64::new(0);
-
-
 #[cfg(test)]
 mod tests;
-
-impl Drop for Cursor<'_> {
-     fn drop(&mut self) {
-        println!("ID start branch counts:");
-        println!("  a-z: {}", LOWERCASE_COUNT.load(Ordering::Relaxed));
-        println!("  A-Z: {}", UPPERCASE_COUNT.load(Ordering::Relaxed));
-        println!("  _: {}", UNDERSCORE_COUNT.load(Ordering::Relaxed));
-        println!("  $: {}", DOLLAR_COUNT.load(Ordering::Relaxed));
-    }
-}
 
 /// Returns `true` if the given character is considered a whitespace.
 #[inline]
@@ -43,46 +26,23 @@ pub const fn is_whitespace_byte(c: u8) -> bool {
 
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
 #[inline]
-pub fn is_id_start(c: char) -> bool {
+pub const fn is_id_start(c: char) -> bool {
     is_id_start_byte(ch2u8(c))
 }
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
-// #[inline]
-// pub const fn is_id_start_byte(c: u8) -> bool {
-//     matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$')
-// }
 #[inline]
-pub fn is_id_start_byte(c: u8) -> bool {
-    match c {
-        b'a'..=b'z' => {
-            LOWERCASE_COUNT.fetch_add(1, Ordering::Relaxed);
-            true
-        }
-        b'A'..=b'Z' => {
-            UPPERCASE_COUNT.fetch_add(1, Ordering::Relaxed);
-            true
-        }
-        b'_' => {
-            UNDERSCORE_COUNT.fetch_add(1, Ordering::Relaxed);
-            true
-        }
-        b'$' => {
-            DOLLAR_COUNT.fetch_add(1, Ordering::Relaxed);
-            true
-        }
-        _ => false,
-    }
-  }
-
+pub const fn is_id_start_byte(c: u8) -> bool {
+    matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$')
+}
 
 /// Returns `true` if the given character is valid in a Solidity identifier.
 #[inline]
-pub fn is_id_continue(c: char) -> bool {
+pub const fn is_id_continue(c: char) -> bool {
     is_id_continue_byte(ch2u8(c))
 }
 /// Returns `true` if the given character is valid in a Solidity identifier.
 #[inline]
-pub fn is_id_continue_byte(c: u8) -> bool {
+pub const fn is_id_continue_byte(c: u8) -> bool {
     let is_number = (c >= b'0') & (c <= b'9');
     is_id_start_byte(c) || is_number
 }
@@ -94,14 +54,14 @@ pub fn is_id_continue_byte(c: u8) -> bool {
 ///
 /// Reference: <https://docs.soliditylang.org/en/latest/grammar.html#a4.SolidityLexer.Identifier>
 #[inline]
-pub fn is_ident(s: &str) -> bool {
+pub const fn is_ident(s: &str) -> bool {
     is_ident_bytes(s.as_bytes())
 }
 
 /// Returns `true` if the given byte slice is a valid Solidity identifier.
 ///
 /// See [`is_ident`] for more details.
-pub fn is_ident_bytes(s: &[u8]) -> bool {
+pub const fn is_ident_bytes(s: &[u8]) -> bool {
     let [first, ref rest @ ..] = *s else {
         return false;
     };
@@ -471,8 +431,6 @@ impl<'a> Cursor<'a> {
     #[inline]
     fn peek_byte(&self, index: usize) -> u8 {
         self.as_bytes().get(index).copied().unwrap_or(EOF)
-        // let a = self.as_bytes().get(index).unwrap_or(&8_u8);
-        // *a
     }
 
     /// Checks if there is nothing more to consume.
