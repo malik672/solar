@@ -32,6 +32,11 @@ pub const fn is_id_start(c: char) -> bool {
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
 #[inline]
 pub const fn is_id_start_byte(c: u8) -> bool {
+    matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$')
+}
+
+#[inline]
+pub const fn is_id_start_byte_ascii(c: u8) -> bool {
     // Check for $ or _
     if c == b'$' || c == b'_' {
         return true;
@@ -155,7 +160,7 @@ impl<'a> Cursor<'a> {
             c if is_whitespace_byte(c) => self.whitespace(),
 
             // Identifier (this should be checked after other variant that can start as identifier).
-            c if is_id_start_byte(c) => self.ident_or_prefixed_literal(c),
+            c if is_id_start_byte_ascii(c) => self.ident_or_prefixed_literal(c),
 
             // Numeric literal.
             b'0'..=b'9' => {
