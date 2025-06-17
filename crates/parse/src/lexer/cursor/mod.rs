@@ -151,7 +151,7 @@ impl<'a> Cursor<'a> {
             // Slash, comment or block comment.
             b'/' => match self.first() {
                 b'/' => self.line_comment(),
-                b'*' => unlikely(self.block_comment()),
+                b'*' => self.block_comment(),
                 _ => RawTokenKind::Slash,
             },
 
