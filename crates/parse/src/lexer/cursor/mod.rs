@@ -32,8 +32,19 @@ pub const fn is_id_start(c: char) -> bool {
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
 #[inline]
 pub const fn is_id_start_byte(c: u8) -> bool {
-    matches!(c, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$')
+    // Check for $ or _
+    if c == b'$' || c == b'_' {
+        return true;
+    }
+    
+    // Check for A-Z or a-z using bit manipulation
+    // For uppercase: A-Z (0x41-0x5A), lowercase: a-z (0x61-0x7A)
+    // Both have the pattern: (c | 0x20) gives lowercase, then check if in a-z range
+    let lower = c | 0x20;
+    lower >= b'a' && lower <= b'z'
 }
+
+
 
 /// Returns `true` if the given character is valid in a Solidity identifier.
 #[inline]

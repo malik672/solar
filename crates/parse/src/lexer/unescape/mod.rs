@@ -97,8 +97,13 @@ pub fn unescape_literal<F>(src: &str, kind: StrKind, mut callback: F)
 where
     F: FnMut(Range<usize>, Result<u32, EscapeError>),
 {
+    let ers = src.as_bytes();
     if needs_unescape(src, kind) {
         unescape_literal_unchecked(src, kind, callback)
+    } else if ers.is_ascii() {
+        for (i, byte) in ers.iter().copied().enumerate() {
+            callback(i..i + 1, Ok(byte as u32));
+        }
     } else {
         for (i, ch) in src.char_indices() {
             callback(i..i + ch.len_utf8(), Ok(ch as u32));
