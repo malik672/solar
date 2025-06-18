@@ -24,6 +24,7 @@ pub const fn is_whitespace_byte(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | b'\r')
 }
 
+
 /// Returns `true` if the given character is valid at the start of a Solidity identifier.
 #[inline]
 pub const fn is_id_start(c: char) -> bool {
@@ -41,7 +42,7 @@ pub const fn is_id_start_byte_ascii(c: u8) -> bool {
     if c == b'$' || c == b'_' {
         return true;
     }
-    
+
     // Check for A-Z or a-z using bit manipulation
     // For uppercase: A-Z (0x41-0x5A), lowercase: a-z (0x61-0x7A)
     // Both have the pattern: (c | 0x20) gives lowercase, then check if in a-z range
@@ -49,18 +50,29 @@ pub const fn is_id_start_byte_ascii(c: u8) -> bool {
     lower >= b'a' && lower <= b'z'
 }
 
-
-
 /// Returns `true` if the given character is valid in a Solidity identifier.
 #[inline]
 pub const fn is_id_continue(c: char) -> bool {
     is_id_continue_byte(ch2u8(c))
 }
 /// Returns `true` if the given character is valid in a Solidity identifier.
+// #[inline]
+// pub const fn is_id_continue_byte(c: u8) -> bool {
+//     let is_number = (c >= b'0') & (c <= b'9');
+//     is_id_start_byte(c) || is_number
+// }
+
 #[inline]
 pub const fn is_id_continue_byte(c: u8) -> bool {
-    let is_number = (c >= b'0') & (c <= b'9');
-    is_id_start_byte(c) || is_number
+    // This combines all checks into fewer branches
+    match c {
+        b'_' | b'$' => true,
+        b'0'..=b'9' => true,
+        _ => {
+            let lowercase = c | 0x20;
+            lowercase >= b'a' && lowercase <= b'z'
+        }
+    }
 }
 
 /// Returns `true` if the given string is a valid Solidity identifier.
@@ -147,6 +159,11 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
+        if !first_char.is_ascii() {
+            self.bump_utf8_with(first_char);
+            return RawTokenKind::Unknown;
+        }
+
         match first_char {
             // Slash, comment or block comment.
             b'/' => match self.first() {
@@ -166,7 +183,7 @@ impl<'a> Cursor<'a> {
                 let kind = self.number(first_char);
                 RawTokenKind::Literal { kind }
             }
-            b'.' if self.first().is_ascii_digit() => {
+            b'.' if (self.first().wrapping_sub(b'0')) < 10 => {
                 let kind = self.rational_number_after_dot(Base::Decimal);
                 RawTokenKind::Literal { kind }
             }
@@ -204,9 +221,6 @@ impl<'a> Cursor<'a> {
             }
 
             _ => {
-                if unlikely(!first_char.is_ascii()) {
-                    self.bump_utf8_with(first_char);
-                }
                 RawTokenKind::Unknown
             }
         }
@@ -441,6 +455,11 @@ impl<'a> Cursor<'a> {
         self.peek_byte(0)
     }
 
+    #[inline]
+    fn first_unchecked(&self) -> u8 {
+        self.peek_byte_unchecked(0)
+    }
+
     /// Peeks the second byte from the input stream without consuming it.
     #[inline]
     fn second(&self) -> u8 {
@@ -454,6 +473,13 @@ impl<'a> Cursor<'a> {
     #[inline]
     fn peek_byte(&self, index: usize) -> u8 {
         self.as_bytes().get(index).copied().unwrap_or(EOF)
+    }
+
+    // Do not use directly.
+    #[doc(hidden)]
+    #[inline]
+    fn peek_byte_unchecked(&self, index: usize) -> u8 {
+        unsafe { *self.as_bytes().get_unchecked(index) }
     }
 
     /// Checks if there is nothing more to consume.
