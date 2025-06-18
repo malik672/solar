@@ -124,14 +124,18 @@ impl<'a> Cursor<'a> {
 
     #[inline]
     fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
-        match first_char {
-            // Slash, comment or block comment.
-            b'/' => match self.first() {
-                b'/' => self.line_comment(),
-                b'*' => self.block_comment(),
-                _ => RawTokenKind::Slash,
-            },
+        if first_char == b'/' {
+            let next = self.first();
+            return if next == b'/' {
+                self.line_comment()
+            } else if next == b'*' {
+                self.block_comment()
+            } else {
+                RawTokenKind::Slash
+            };
+        };
 
+        match first_char {
             // Whitespace sequence.
             c if is_whitespace_byte(c) => self.whitespace(),
 
