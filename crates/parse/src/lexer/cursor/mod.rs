@@ -106,6 +106,9 @@ impl<'a> Cursor<'a> {
 
     /// Parses a token from the input string.
     pub fn advance_token(&mut self) -> RawToken {
+        unsafe {
+            std::arch::asm!("# LLVM-MCA-BEGIN your_function");
+        }
         // Use the pointer instead of the length to track how many bytes were consumed, since
         // internally the iterator is a pair of `start` and `end` pointers.
         let start = self.as_ptr();
@@ -119,20 +122,32 @@ impl<'a> Cursor<'a> {
         // SAFETY: `start` points to the same string.
         let len = unsafe { self.as_ptr().offset_from_unsigned(start) };
 
+        unsafe {
+            std::arch::asm!("# LLVM-MCA-END");
+        }
+
         RawToken::new(token_kind, len as u32)
     }
 
     #[inline]
     fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
-        if first_char == b'/' && self.first() == b'/' {
+        let next_char = self.first();
+        if first_char == b'/' && next_char == b'/' {
             return self.line_comment();
-        } else if first_char == b'/' && self.first() == b'*' {
+        } else if first_char == b'/' && next_char == b'*' {
             return self.block_comment();
         } else if first_char == b'/' {
             return RawTokenKind::Slash;
         }
 
         match first_char {
+            // Slash, comment or block comment.
+            // b'/' => match self.first() {
+            //     b'/' => self.line_comment(),
+            //     b'*' => self.block_comment(),
+            //     _ => RawTokenKind::Slash,
+            // },
+
             // Whitespace sequence.
             c if is_whitespace_byte(c) => self.whitespace(),
 
@@ -144,7 +159,7 @@ impl<'a> Cursor<'a> {
                 let kind = self.number(first_char);
                 RawTokenKind::Literal { kind }
             }
-            b'.' if self.first().is_ascii_digit() => {
+            b'.' if next_char.is_ascii_digit() => {
                 let kind = self.rational_number_after_dot(Base::Decimal);
                 RawTokenKind::Literal { kind }
             }

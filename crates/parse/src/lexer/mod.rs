@@ -90,11 +90,12 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
     #[instrument(name = "lex", level = "debug", skip_all)]
     pub fn into_tokens(mut self) -> Vec<Token> {
         // This is an estimate of the number of tokens in the source.
-        let mut tokens = Vec::with_capacity(self.src.len() / 4);
+        let mut tokens = Vec::with_capacity(self.src.len() / 2);
         loop {
             let token = self.next_token();
             if token.is_eof() {
                 break;
+                
             }
             if token.is_comment() {
                 continue;
