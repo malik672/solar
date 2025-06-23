@@ -130,8 +130,8 @@ impl<'a> Cursor<'a> {
         RawToken::new(token_kind, len as u32)
     }
 
-    #[inline]
-    fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
+
+    pub fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
         match first_char {
             // Slash, comment or block comment.
             b'/' => match self.first() {
