@@ -8,7 +8,7 @@ use std::{
 
 #[allow(unexpected_cfgs)]
 pub const PARSERS: &[&dyn Parser] =
-    if cfg!(codspeed) { &[&Solar] } else { &[&Solc, &Solar, &Solang, &Slang, &TreeSitter] };
+    if cfg!(true) { &[&Solar] } else { &[&Solc, &Solar, &Solang, &Slang, &TreeSitter] };
 
 pub fn get_srcs() -> &'static [Source] {
     static CACHE: std::sync::OnceLock<Vec<Source>> = std::sync::OnceLock::new();
