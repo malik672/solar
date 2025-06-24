@@ -479,7 +479,7 @@ impl<'a> Cursor<'a> {
 
     /// Advances `n` bytes.
     #[cfg_attr(debug_assertions, track_caller)]
-    fn ignore_bytes(&mut self, n: usize) {
+    pub fn ignore_bytes(&mut self, n: usize) {
         debug_assert!(n <= self.as_bytes().len());
         self.bytes = unsafe { self.as_bytes().get_unchecked(n..) }.iter();
     }
