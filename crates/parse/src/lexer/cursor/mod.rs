@@ -355,7 +355,19 @@ impl<'a> Cursor<'a> {
 
     /// Eats characters for a decimal number. Returns `true` if any digits were encountered.
     pub fn eat_decimal_digits(&mut self) -> bool {
-        self.eat_digits(|x| x.is_ascii_digit())
+        // self.eat_digits(|x| x.is_ascii_digit())
+        let mut has_digits = false;
+        loop {
+            match self.first() {
+                b'_' => self.bump(),
+                b'0'..=b'9' => {
+                    has_digits = true;
+                    self.bump();
+                }
+                _ => break,
+            }
+        }
+        has_digits
     }
 
     /// Eats characters for a hexadecimal number. Returns `true` if any digits were encountered.
