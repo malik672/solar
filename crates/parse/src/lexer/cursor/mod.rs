@@ -130,8 +130,8 @@ impl<'a> Cursor<'a> {
         RawToken::new(token_kind, len as u32)
     }
 
-
-    pub fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
+    #[inline]
+    fn advance_token_kind(&mut self, first_char: u8) -> RawTokenKind {
         match first_char {
             // Slash, comment or block comment.
             b'/' => match self.first() {
@@ -478,7 +478,6 @@ impl<'a> Cursor<'a> {
     }
 
     /// Advances `n` bytes.
-    #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     fn ignore_bytes(&mut self, n: usize) {
         debug_assert!(n <= self.as_bytes().len());
