@@ -354,16 +354,16 @@ impl<'a> Cursor<'a> {
     }
 
     /// Eats characters for a decimal number. Returns `true` if any digits were encountered.
-    fn eat_decimal_digits(&mut self) -> bool {
+    pub fn eat_decimal_digits(&mut self) -> bool {
         self.eat_digits(|x| x.is_ascii_digit())
     }
 
     /// Eats characters for a hexadecimal number. Returns `true` if any digits were encountered.
-    fn eat_hexadecimal_digits(&mut self) -> bool {
+    pub fn eat_hexadecimal_digits(&mut self) -> bool {
         self.eat_digits(|x| x.is_ascii_hexdigit())
     }
 
-    fn eat_digits(&mut self, mut is_digit: impl FnMut(u8) -> bool) -> bool {
+    pub fn eat_digits(&mut self, mut is_digit: impl FnMut(u8) -> bool) -> bool {
         let mut has_digits = false;
         loop {
             match self.first() {
@@ -437,13 +437,13 @@ impl<'a> Cursor<'a> {
     // Do not use directly.
     #[doc(hidden)]
     #[inline]
-    fn peek_byte(&self, index: usize) -> u8 {
+    pub fn peek_byte(&self, index: usize) -> u8 {
         self.as_bytes().get(index).copied().unwrap_or(EOF)
     }
 
     /// Checks if there is nothing more to consume.
     #[inline]
-    fn is_eof(&self) -> bool {
+    pub fn is_eof(&self) -> bool {
         self.as_bytes().is_empty()
     }
 
@@ -457,7 +457,7 @@ impl<'a> Cursor<'a> {
     /// Assumes that `x` is the previously consumed byte.
     #[cold]
     #[allow(clippy::match_overlapping_arm)]
-    fn bump_utf8_with(&mut self, x: u8) {
+    pub fn bump_utf8_with(&mut self, x: u8) {
         debug_assert_eq!(self.prev(), x);
         let skip = match x {
             ..0x80 => 0,
@@ -471,13 +471,14 @@ impl<'a> Cursor<'a> {
     }
 
     /// Moves to the next character, returning the current one.
-    fn bump_ret(&mut self) -> Option<u8> {
+    pub fn bump_ret(&mut self) -> Option<u8> {
         let c = self.as_bytes().first().copied();
         self.bytes.next();
         c
     }
 
     /// Advances `n` bytes.
+    #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn ignore_bytes(&mut self, n: usize) {
         debug_assert!(n <= self.as_bytes().len());
@@ -487,8 +488,7 @@ impl<'a> Cursor<'a> {
     /// Eats symbols until `ch1` or `ch2` is found or until the end of file is reached.
     ///
     /// Returns `true` if `ch1` or `ch2` was found, `false` if the end of file was reached.
-    #[inline]
-    fn eat_until_either(&mut self, ch1: u8, ch2: u8) -> bool {
+    pub fn eat_until_either(&mut self, ch1: u8, ch2: u8) -> bool {
         let b = self.as_bytes();
         let res = memchr::memchr2(ch1, ch2, b);
         self.ignore_bytes(res.unwrap_or(b.len()));
@@ -496,8 +496,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// Eats symbols while predicate returns true or until the end of file is reached.
-    #[inline]
-    fn eat_while(&mut self, mut predicate: impl FnMut(u8) -> bool) {
+    pub fn eat_while(&mut self, mut predicate: impl FnMut(u8) -> bool) {
         while predicate(self.first()) && !self.is_eof() {
             self.bump();
         }
