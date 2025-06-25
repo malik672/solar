@@ -379,7 +379,7 @@ impl<'a> Cursor<'a> {
         let mut has_digits = false;
         loop {
             match self.first() {
-                b'_' => {
+            b'_' => {
                     self.bump();
                 }
                 c if is_digit(c) => {
