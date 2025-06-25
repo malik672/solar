@@ -374,7 +374,7 @@ impl Interner {
 
     #[inline]
     fn intern(&self, string: &str) -> Symbol {
-        println!("Interning: {string}{:?}", "Symbol" self.inner.intern(string));
+        println!("Interning: {string}  Symbol: {:?}", self.inner.intern(string));
         self.inner.intern(string)
     }
 
