@@ -98,7 +98,6 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
                 break;
             }
             if token.is_comment() { 
-                      println!("token: {token:?}");
                 continue;
             }
             tokens.push(token);
