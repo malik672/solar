@@ -93,10 +93,11 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
         let mut tokens = Vec::with_capacity(self.src.len() / 4);
         loop {
             let token = self.next_token();
+            println!("token: {token:?}");
             if token.is_eof() {
                 break;
             }
-            if token.is_comment() {
+            if token.is_comment() { 
                 continue;
             }
             tokens.push(token);

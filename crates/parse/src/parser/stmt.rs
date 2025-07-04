@@ -19,7 +19,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     }
 
     /// Parses a statement kind.
-    pub fn parse_stmt_kind(&mut self) -> PResult<'sess, StmtKind<'ast>> {
+    fn parse_stmt_kind(&mut self) -> PResult<'sess, StmtKind<'ast>> {
         let mut semi = true;
         let kind = if self.eat_keyword(kw::If) {
             semi = false;
