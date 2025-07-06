@@ -94,7 +94,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
         loop {
             let token = self.next_token();
             if token.is_eof() {
-                println!("Size of Token: {} bytes", size_of::<self::Span>());
+                println!("Size of Token: {} bytes", size_of::<self::TokenKind>());
                 println!("token: {token:?}");
                 break;
             }
