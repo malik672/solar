@@ -262,11 +262,9 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
                         err = err.help(help);
                     }
                     if repeats > 0 {
-                        err = if repeats == 1 {
-                            println!("Character repeats once more");
+                        err = if repeats == 1 {           
                             err.note("character repeats once more")
                         } else {
-                            println!("Character repeats than once more");
                             err.note(format!("character repeats {repeats} more times"))
                         };
                     }
@@ -474,6 +472,27 @@ mod tests {
 
     fn sym(s: &str) -> Symbol {
         Symbol::intern(s)
+    }
+
+    #[test]
+    fn repeated_invalid_characters() {
+        solar_interface::SessionGlobals::new().set(|| {
+            // Test single invalid character - should fail with 1 error
+            check("valid∞", true, &[(0..5, id("valid"))]);
+            
+            // Test repeated invalid characters - should fail with 1 error (not 5)
+            // The swallow_next_invalid logic should prevent error spam
+            check("valid∞∞∞∞∞", true, &[(0..5, id("valid"))]);
+            
+            // Test different invalid characters - should fail with multiple errors
+            check("valid∞†", true, &[(0..5, id("valid"))]);
+            
+            // Test non-breaking space handling
+            check("valid\u{00a0}more", true, &[(0..5, id("valid")), (7..11, id("more"))]);
+            
+            // Test mixed valid/invalid sequences
+            check("a∞b†c", true, &[(0..1, id("a")), (4..5, id("b")), (8..9, id("c"))]);
+        });
     }
 
     #[test]
