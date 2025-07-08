@@ -1,5 +1,7 @@
 //! Solidity and Yul lexer.
 
+use std::{collections::HashMap, sync::atomic::{AtomicUsize, Ordering}};
+
 use solar_ast::{
     token::{BinOpToken, CommentKind, Delimiter, Token, TokenKind, TokenLitKind},
     Base, StrKind,
@@ -17,6 +19,100 @@ pub mod unescape;
 mod unicode_chars;
 
 mod utf8;
+
+/// Performance counters for token match arms
+#[derive(Debug, Default)]
+pub struct TokenCounters {
+    pub line_comment: AtomicUsize,
+    pub block_comment: AtomicUsize,
+    pub whitespace: AtomicUsize,
+    pub ident: AtomicUsize,
+    pub literal: AtomicUsize,
+    pub semi: AtomicUsize,
+    pub comma: AtomicUsize,
+    pub dot: AtomicUsize,
+    pub open_paren: AtomicUsize,
+    pub close_paren: AtomicUsize,
+    pub open_brace: AtomicUsize,
+    pub close_brace: AtomicUsize,
+    pub open_bracket: AtomicUsize,
+    pub close_bracket: AtomicUsize,
+    pub tilde: AtomicUsize,
+    pub question: AtomicUsize,
+    pub colon: AtomicUsize,
+    pub eq: AtomicUsize,
+    pub bang: AtomicUsize,
+    pub lt: AtomicUsize,
+    pub gt: AtomicUsize,
+    pub minus: AtomicUsize,
+    pub and: AtomicUsize,
+    pub or: AtomicUsize,
+    pub plus: AtomicUsize,
+    pub star: AtomicUsize,
+    pub slash: AtomicUsize,
+    pub caret: AtomicUsize,
+    pub percent: AtomicUsize,
+    pub unknown: AtomicUsize,
+    pub eof: AtomicUsize,
+}
+
+impl TokenCounters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_stats(&self) -> HashMap<&'static str, usize> {
+        let mut stats = HashMap::new();
+        stats.insert("line_comment", self.line_comment.load(Ordering::Relaxed));
+        stats.insert("block_comment", self.block_comment.load(Ordering::Relaxed));
+        stats.insert("whitespace", self.whitespace.load(Ordering::Relaxed));
+        stats.insert("ident", self.ident.load(Ordering::Relaxed));
+        stats.insert("literal", self.literal.load(Ordering::Relaxed));
+        stats.insert("semi", self.semi.load(Ordering::Relaxed));
+        stats.insert("comma", self.comma.load(Ordering::Relaxed));
+        stats.insert("dot", self.dot.load(Ordering::Relaxed));
+        stats.insert("open_paren", self.open_paren.load(Ordering::Relaxed));
+        stats.insert("close_paren", self.close_paren.load(Ordering::Relaxed));
+        stats.insert("open_brace", self.open_brace.load(Ordering::Relaxed));
+        stats.insert("close_brace", self.close_brace.load(Ordering::Relaxed));
+        stats.insert("open_bracket", self.open_bracket.load(Ordering::Relaxed));
+        stats.insert("close_bracket", self.close_bracket.load(Ordering::Relaxed));
+        stats.insert("tilde", self.tilde.load(Ordering::Relaxed));
+        stats.insert("question", self.question.load(Ordering::Relaxed));
+        stats.insert("colon", self.colon.load(Ordering::Relaxed));
+        stats.insert("eq", self.eq.load(Ordering::Relaxed));
+        stats.insert("bang", self.bang.load(Ordering::Relaxed));
+        stats.insert("lt", self.lt.load(Ordering::Relaxed));
+        stats.insert("gt", self.gt.load(Ordering::Relaxed));
+        stats.insert("minus", self.minus.load(Ordering::Relaxed));
+        stats.insert("and", self.and.load(Ordering::Relaxed));
+        stats.insert("or", self.or.load(Ordering::Relaxed));
+        stats.insert("plus", self.plus.load(Ordering::Relaxed));
+        stats.insert("star", self.star.load(Ordering::Relaxed));
+        stats.insert("slash", self.slash.load(Ordering::Relaxed));
+        stats.insert("caret", self.caret.load(Ordering::Relaxed));
+        stats.insert("percent", self.percent.load(Ordering::Relaxed));
+        stats.insert("unknown", self.unknown.load(Ordering::Relaxed));
+        stats.insert("eof", self.eof.load(Ordering::Relaxed));
+        stats
+    }
+
+    pub fn print_sorted_stats(&self) {
+        let stats = self.get_stats();
+        let mut sorted: Vec<_> = stats.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        
+        println!("Token frequency statistics (sorted by count):");
+        println!("{:<15} {:<10}", "Token", "Count");
+        println!("{:-<25}", "");
+        for (token, count) in sorted {
+            if count > 0 {
+                println!("{:<15} {:<10}", token, count);
+            }
+        }
+    }
+}
+
 
 /// Solidity and Yul lexer.
 ///
@@ -46,6 +142,9 @@ pub struct Lexer<'sess, 'src> {
     /// in this file, it's safe to treat further occurrences of the non-breaking
     /// space character as whitespace.
     nbsp_is_whitespace: bool,
+
+      /// Performance counters for profiling
+    pub counters: TokenCounters,
 }
 
 impl<'sess, 'src> Lexer<'sess, 'src> {
@@ -71,6 +170,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
             cursor: Cursor::new(src),
             token: Token::DUMMY,
             nbsp_is_whitespace: false,
+            counters: TokenCounters::new(),
         };
         (lexer.token, _) = lexer.bump();
         lexer
@@ -108,6 +208,8 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
             ratio = %format_args!("{:.2}", self.src.len() as f64 / tokens.len() as f64),
             "lexed"
         );
+        self.counters.print_sorted_stats();
+        
         tokens
     }
 
@@ -129,6 +231,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
         std::mem::replace(&mut self.token, next_token)
     }
 
+
     fn bump(&mut self) -> (Token, bool) {
         let mut preceded_by_whitespace = false;
         let mut swallow_next_invalid = 0;
@@ -141,6 +244,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
             // This turns strings into interned symbols and runs additional validation.
             let kind = match raw_kind {
                 RawTokenKind::LineComment { is_doc } => {
+                    self.counters.line_comment.fetch_add(1, Ordering::Relaxed);
                     preceded_by_whitespace = true;
 
                     // Opening delimiter is not included into the symbol.
@@ -149,6 +253,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
                     self.cook_doc_comment(content_start, content, is_doc, CommentKind::Line)
                 }
                 RawTokenKind::BlockComment { is_doc, terminated } => {
+                    self.counters.block_comment.fetch_add(1, Ordering::Relaxed);
                     preceded_by_whitespace = true;
 
                     if !terminated {
@@ -167,44 +272,121 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
                     self.cook_doc_comment(content_start, content, is_doc, CommentKind::Block)
                 }
                 RawTokenKind::Whitespace => {
+                    self.counters.whitespace.fetch_add(1, Ordering::Relaxed);
                     preceded_by_whitespace = true;
                     continue;
                 }
                 RawTokenKind::Ident => {
+                    self.counters.ident.fetch_add(1, Ordering::Relaxed);
                     let sym = self.symbol_from(start);
                     TokenKind::Ident(sym)
                 }
                 RawTokenKind::Literal { kind } => {
+                    self.counters.literal.fetch_add(1, Ordering::Relaxed);
                     let (kind, symbol) = self.cook_literal(start, self.pos, kind);
                     TokenKind::Literal(kind, symbol)
                 }
 
-                RawTokenKind::Semi => TokenKind::Semi,
-                RawTokenKind::Comma => TokenKind::Comma,
-                RawTokenKind::Dot => TokenKind::Dot,
-                RawTokenKind::OpenParen => TokenKind::OpenDelim(Delimiter::Parenthesis),
-                RawTokenKind::CloseParen => TokenKind::CloseDelim(Delimiter::Parenthesis),
-                RawTokenKind::OpenBrace => TokenKind::OpenDelim(Delimiter::Brace),
-                RawTokenKind::CloseBrace => TokenKind::CloseDelim(Delimiter::Brace),
-                RawTokenKind::OpenBracket => TokenKind::OpenDelim(Delimiter::Bracket),
-                RawTokenKind::CloseBracket => TokenKind::CloseDelim(Delimiter::Bracket),
-                RawTokenKind::Tilde => TokenKind::Tilde,
-                RawTokenKind::Question => TokenKind::Question,
-                RawTokenKind::Colon => TokenKind::Colon,
-                RawTokenKind::Eq => TokenKind::Eq,
-                RawTokenKind::Bang => TokenKind::Not,
-                RawTokenKind::Lt => TokenKind::Lt,
-                RawTokenKind::Gt => TokenKind::Gt,
-                RawTokenKind::Minus => TokenKind::BinOp(BinOpToken::Minus),
-                RawTokenKind::And => TokenKind::BinOp(BinOpToken::And),
-                RawTokenKind::Or => TokenKind::BinOp(BinOpToken::Or),
-                RawTokenKind::Plus => TokenKind::BinOp(BinOpToken::Plus),
-                RawTokenKind::Star => TokenKind::BinOp(BinOpToken::Star),
-                RawTokenKind::Slash => TokenKind::BinOp(BinOpToken::Slash),
-                RawTokenKind::Caret => TokenKind::BinOp(BinOpToken::Caret),
-                RawTokenKind::Percent => TokenKind::BinOp(BinOpToken::Percent),
+                RawTokenKind::Semi => {
+                    self.counters.semi.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Semi
+                }
+                RawTokenKind::Comma => {
+                    self.counters.comma.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Comma
+                }
+                RawTokenKind::Dot => {
+                    self.counters.dot.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Dot
+                }
+                RawTokenKind::OpenParen => {
+                    self.counters.open_paren.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::OpenDelim(Delimiter::Parenthesis)
+                }
+                RawTokenKind::CloseParen => {
+                    self.counters.close_paren.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::CloseDelim(Delimiter::Parenthesis)
+                }
+                RawTokenKind::OpenBrace => {
+                    self.counters.open_brace.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::OpenDelim(Delimiter::Brace)
+                }
+                RawTokenKind::CloseBrace => {
+                    self.counters.close_brace.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::CloseDelim(Delimiter::Brace)
+                }
+                RawTokenKind::OpenBracket => {
+                    self.counters.open_bracket.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::OpenDelim(Delimiter::Bracket)
+                }
+                RawTokenKind::CloseBracket => {
+                    self.counters.close_bracket.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::CloseDelim(Delimiter::Bracket)
+                }
+                RawTokenKind::Tilde => {
+                    self.counters.tilde.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Tilde
+                }
+                RawTokenKind::Question => {
+                    self.counters.question.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Question
+                }
+                RawTokenKind::Colon => {
+                    self.counters.colon.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Colon
+                }
+                RawTokenKind::Eq => {
+                    self.counters.eq.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Eq
+                }
+                RawTokenKind::Bang => {
+                    self.counters.bang.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Not
+                }
+                RawTokenKind::Lt => {
+                    self.counters.lt.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Lt
+                }
+                RawTokenKind::Gt => {
+                    self.counters.gt.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Gt
+                }
+                RawTokenKind::Minus => {
+                    self.counters.minus.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::Minus)
+                }
+                RawTokenKind::And => {
+                    self.counters.and.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::And)
+                }
+                RawTokenKind::Or => {
+                    self.counters.or.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::Or)
+                }
+                RawTokenKind::Plus => {
+                    self.counters.plus.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::Plus)
+                }
+                RawTokenKind::Star => {
+                    self.counters.star.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::Star)
+                }
+                RawTokenKind::Slash => {
+                    self.counters.slash.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::Slash)
+                }
+                RawTokenKind::Caret => {
+                    self.counters.caret.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::Caret)
+                }
+                RawTokenKind::Percent => {
+                    self.counters.percent.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::BinOp(BinOpToken::Percent)
+                }
 
                 RawTokenKind::Unknown => {
+                    self.counters.unknown.fetch_add(1, Ordering::Relaxed);
+                    
                     // Don't emit diagnostics for sequences of the same invalid token
                     if swallow_next_invalid > 0 {
                         swallow_next_invalid -= 1;
@@ -241,7 +423,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
                                 ascii_str,
                                 ascii_name,
                             } => {
-                                let msg = format!("Unicode characters '“' (Left Double Quotation Mark) and '”' (Right Double Quotation Mark) look like '{ascii_str}' ({ascii_name}), but are not");
+                                let msg = format!("Unicode characters  (Right Double Quotation Mark) look like '{ascii_str}' ({ascii_name}), but are not");
                                 err = err.span_help(span, msg);
                             }
                             unicode_chars::TokenSubstitution::Other {
@@ -278,12 +460,171 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
                     }
                 }
 
-                RawTokenKind::Eof => TokenKind::Eof,
+                RawTokenKind::Eof => {
+                    self.counters.eof.fetch_add(1, Ordering::Relaxed);
+                    TokenKind::Eof
+                }
             };
             let span = self.new_span(start, self.pos);
             return (Token::new(kind, span), preceded_by_whitespace);
         }
     }
+
+    // fn bump(&mut self) -> (Token, bool) {
+    //     let mut preceded_by_whitespace = false;
+    //     let mut swallow_next_invalid = 0;
+    //     loop {
+    //         let RawToken { kind: raw_kind, len } = self.cursor.advance_token();
+    //         let start = self.pos;
+    //         self.pos += len;
+
+    //         // Now "cook" the token, converting the simple `RawTokenKind` into a rich `TokenKind`.
+    //         // This turns strings into interned symbols and runs additional validation.
+    //         let kind = match raw_kind {
+    //             RawTokenKind::LineComment { is_doc } => {
+    //                 preceded_by_whitespace = true;
+
+    //                 // Opening delimiter is not included into the symbol.
+    //                 let content_start = start + BytePos(if is_doc { 3 } else { 2 });
+    //                 let content = self.str_from(content_start);
+    //                 self.cook_doc_comment(content_start, content, is_doc, CommentKind::Line)
+    //             }
+    //             RawTokenKind::BlockComment { is_doc, terminated } => {
+    //                 preceded_by_whitespace = true;
+
+    //                 if !terminated {
+    //                     let msg = if is_doc {
+    //                         "unterminated block doc-comment"
+    //                     } else {
+    //                         "unterminated block comment"
+    //                     };
+    //                     self.dcx().err(msg).span(self.new_span(start, self.pos)).emit();
+    //                 }
+
+    //                 // Opening delimiter and closing delimiter are not included into the symbol.
+    //                 let content_start = start + BytePos(if is_doc { 3 } else { 2 });
+    //                 let content_end = self.pos - (terminated as u32) * 2;
+    //                 let content = self.str_from_to(content_start, content_end);
+    //                 self.cook_doc_comment(content_start, content, is_doc, CommentKind::Block)
+    //             }
+    //             RawTokenKind::Whitespace => {
+    //                 preceded_by_whitespace = true;
+    //                 continue;
+    //             }
+    //             RawTokenKind::Ident => {
+    //                 let sym = self.symbol_from(start);
+    //                 TokenKind::Ident(sym)
+    //             }
+    //             RawTokenKind::Literal { kind } => {
+    //                 let (kind, symbol) = self.cook_literal(start, self.pos, kind);
+    //                 TokenKind::Literal(kind, symbol)
+    //             }
+
+    //             RawTokenKind::Semi => TokenKind::Semi,
+    //             RawTokenKind::Comma => TokenKind::Comma,
+    //             RawTokenKind::Dot => TokenKind::Dot,
+    //             RawTokenKind::OpenParen => TokenKind::OpenDelim(Delimiter::Parenthesis),
+    //             RawTokenKind::CloseParen => TokenKind::CloseDelim(Delimiter::Parenthesis),
+    //             RawTokenKind::OpenBrace => TokenKind::OpenDelim(Delimiter::Brace),
+    //             RawTokenKind::CloseBrace => TokenKind::CloseDelim(Delimiter::Brace),
+    //             RawTokenKind::OpenBracket => TokenKind::OpenDelim(Delimiter::Bracket),
+    //             RawTokenKind::CloseBracket => TokenKind::CloseDelim(Delimiter::Bracket),
+    //             RawTokenKind::Tilde => TokenKind::Tilde,
+    //             RawTokenKind::Question => TokenKind::Question,
+    //             RawTokenKind::Colon => TokenKind::Colon,
+    //             RawTokenKind::Eq => TokenKind::Eq,
+    //             RawTokenKind::Bang => TokenKind::Not,
+    //             RawTokenKind::Lt => TokenKind::Lt,
+    //             RawTokenKind::Gt => TokenKind::Gt,
+    //             RawTokenKind::Minus => TokenKind::BinOp(BinOpToken::Minus),
+    //             RawTokenKind::And => TokenKind::BinOp(BinOpToken::And),
+    //             RawTokenKind::Or => TokenKind::BinOp(BinOpToken::Or),
+    //             RawTokenKind::Plus => TokenKind::BinOp(BinOpToken::Plus),
+    //             RawTokenKind::Star => TokenKind::BinOp(BinOpToken::Star),
+    //             RawTokenKind::Slash => TokenKind::BinOp(BinOpToken::Slash),
+    //             RawTokenKind::Caret => TokenKind::BinOp(BinOpToken::Caret),
+    //             RawTokenKind::Percent => TokenKind::BinOp(BinOpToken::Percent),
+
+    //             RawTokenKind::Unknown => {
+    //                 // Don't emit diagnostics for sequences of the same invalid token
+    //                 if swallow_next_invalid > 0 {
+    //                     swallow_next_invalid -= 1;
+    //                     continue;
+    //                 }
+    //                 let mut it = self.str_from_to_end(start).chars();
+    //                 let c = it.next().unwrap();
+    //                 if c == '\u{00a0}' {
+    //                     // If an error has already been reported on non-breaking
+    //                     // space characters earlier in the file, treat all
+    //                     // subsequent occurrences as whitespace.
+    //                     if self.nbsp_is_whitespace {
+    //                         preceded_by_whitespace = true;
+    //                         continue;
+    //                     }
+    //                     self.nbsp_is_whitespace = true;
+    //                 }
+
+    //                 let repeats = it.take_while(|c1| *c1 == c).count();
+    //                 swallow_next_invalid = repeats;
+
+    //                 let (token, sugg) =
+    //                     unicode_chars::check_for_substitution(self, start, c, repeats + 1);
+
+    //                 let span = self
+    //                     .new_span(start, self.pos + BytePos::from_usize(repeats * c.len_utf8()));
+    //                 let msg = format!("unknown start of token: {}", escaped_char(c));
+    //                 let mut err = self.dcx().err(msg).span(span);
+    //                 if let Some(sugg) = sugg {
+    //                     match sugg {
+    //                         unicode_chars::TokenSubstitution::DirectedQuotes {
+    //                             span,
+    //                             suggestion: _,
+    //                             ascii_str,
+    //                             ascii_name,
+    //                         } => {
+    //                             let msg = format!("Unicode characters '“' (Left Double Quotation Mark) and '”' (Right Double Quotation Mark) look like '{ascii_str}' ({ascii_name}), but are not");
+    //                             err = err.span_help(span, msg);
+    //                         }
+    //                         unicode_chars::TokenSubstitution::Other {
+    //                             span,
+    //                             suggestion: _,
+    //                             ch,
+    //                             u_name,
+    //                             ascii_str,
+    //                             ascii_name,
+    //                         } => {
+    //                             let msg = format!("Unicode character '{ch}' ({u_name}) looks like '{ascii_str}' ({ascii_name}), but it is not");
+    //                             err = err.span_help(span, msg);
+    //                         }
+    //                     }
+    //                 }
+    //                 if c == '\0' {
+    //                     let help = "source files must contain UTF-8 encoded text, unexpected null bytes might occur when a different encoding is used";
+    //                     err = err.help(help);
+    //                 }
+    //                 if repeats > 0 {
+    //                     err = if repeats == 1 {           
+    //                         err.note("character repeats once more")
+    //                     } else {
+    //                         err.note(format!("character repeats {repeats} more times"))
+    //                     };
+    //                 }
+    //                 err.emit();
+
+    //                 if let Some(token) = token {
+    //                     token
+    //                 } else {
+    //                     preceded_by_whitespace = true;
+    //                     continue;
+    //                 }
+    //             }
+
+    //             RawTokenKind::Eof => TokenKind::Eof,
+    //         };
+    //         let span = self.new_span(start, self.pos);
+    //         return (Token::new(kind, span), preceded_by_whitespace);
+    //     }
+    // }
 
     fn cook_doc_comment(
         &self,
