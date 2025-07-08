@@ -90,15 +90,13 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
     #[instrument(name = "lex", level = "debug", skip_all)]
     pub fn into_tokens(mut self) -> Vec<Token> {
         // This is an estimate of the number of tokens in the source.
-        let mut tokens = Vec::with_capacity(self.src.len() / 4);
+        let mut tokens = Vec::with_capacity(self.src.len() / 6);
         loop {
             let token = self.next_token();
             if token.is_eof() {
-                println!("Size of Token: {} bytes", size_of::<self::TokenKind>());
-                println!("token: {token:?}");
                 break;
             }
-            if token.is_comment() { 
+            if token.is_comment() {
                 continue;
             }
             tokens.push(token);
@@ -114,6 +112,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
     }
 
     /// Returns the next token, advancing the lexer.
+    #[inline]
     pub fn next_token(&mut self) -> Token {
         let mut next_token;
         loop {
@@ -263,11 +262,13 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
                         err = err.help(help);
                     }
                     if repeats > 0 {
-                        let note = match repeats {
-                            1 => "once more".to_string(),
-                            _ => format!("{repeats} more times"),
+                        err = if repeats == 1 {
+                            println!("Character repeats once more");
+                            err.note("character repeats once more")
+                        } else {
+                            println!("Character repeats than once more");
+                            err.note(format!("character repeats {repeats} more times"))
                         };
-                        err = err.note(format!("character repeats {note}"));
                     }
                     err.emit();
 
