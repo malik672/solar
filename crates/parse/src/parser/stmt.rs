@@ -26,7 +26,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             self.parse_stmt_if()
         } else if self.eat_keyword(kw::While) {
             semi = false;
-            self.parse_stmt_while()
+            Self::parse_stmt_while(self)
         } else if self.eat_keyword(kw::Do) {
             self.parse_stmt_do_while()
         } else if self.eat_keyword(kw::For) {
@@ -65,7 +65,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             Ok(StmtKind::Placeholder)
         } else {
             self.parse_simple_stmt_kind()
-        };
+     };
         if semi && kind.is_ok() {
             self.expect_semi()?;
         }

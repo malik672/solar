@@ -650,7 +650,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// `f` must consume tokens until reaching the next separator or
     /// closing bracket.
     #[track_caller]
-    pub fn parse_seq_to_before_tokens<T>(
+    fn parse_seq_to_before_tokens<T>(
         &mut self,
         kets: &[TokenKind],
         sep: SeqSep,
@@ -660,7 +660,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let mut first = true;
         let mut recovered = false;
         let mut trailing = false;
-        let mut v = SmallVec::<[T; 8]>::new();
+        let mut v = Vec::with_capacity(kets.len());
 
         if !allow_empty {
             v.push(f(self)?);
@@ -713,7 +713,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             }
         }
 
-        Ok((self.alloc_smallvec(v), recovered))
+        Ok((self.alloc_vec(v), recovered))
     }
 
     /// Advance the parser by one token.
