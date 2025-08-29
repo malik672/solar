@@ -650,7 +650,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// `f` must consume tokens until reaching the next separator or
     /// closing bracket.
     #[track_caller]
-    fn parse_seq_to_before_tokens<T>(
+    pub fn parse_seq_to_before_tokens<T>(
         &mut self,
         kets: &[TokenKind],
         sep: SeqSep,
