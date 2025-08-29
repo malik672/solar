@@ -660,7 +660,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let mut first = true;
         let mut recovered = false;
         let mut trailing = false;
-        let mut v = Vec::with_capacity(kets.len());
+        let mut v: SmallVec<[T; 2]> = SmallVec::<[T; 2]>::new();
 
         if !allow_empty {
             v.push(f(self)?);
@@ -713,7 +713,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             }
         }
 
-        Ok((self.alloc_vec(v), recovered))
+        Ok((self.alloc_smallvec(v), recovered))
     }
 
     /// Advance the parser by one token.
