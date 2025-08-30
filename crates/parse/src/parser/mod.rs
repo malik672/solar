@@ -657,17 +657,30 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         allow_empty: bool,
         mut f: impl FnMut(&mut Self) -> PResult<'sess, T>,
     ) -> PResult<'sess, (Box<'ast, [T]>, bool /* recovered */)> {
+        // Optimization: Fast path for single terminator (most common case)
+        let single_ket = if kets.len() == 1 { Some(kets[0]) } else { None };
+        
         let mut first = true;
         let mut recovered = false;
         let mut trailing = false;
-        let mut v: SmallVec<[T; 10]> = SmallVec::<[T; 10]>::new();
+        let mut v = SmallVec::<[T; 8]>::new();
 
         if !allow_empty {
             v.push(f(self)?);
             first = false;
         }
 
-        while !self.check_any(kets) {
+        loop {
+            // Optimized terminator check
+            let at_terminator = if let Some(ket) = single_ket {
+                self.check(ket)
+            } else {
+                self.check_any(kets)
+            };
+            
+            if at_terminator {
+                break;
+            }
             if let TokenKind::CloseDelim(..) | TokenKind::Eof = self.token.kind {
                 break;
             }
@@ -688,7 +701,14 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                         Err(e) => return Err(e),
                     }
 
-                    if self.check_any(kets) {
+                    // Optimized terminator check for trailing separator detection
+                    let at_terminator = if let Some(ket) = single_ket {
+                        self.check(ket)
+                    } else {
+                        self.check_any(kets)
+                    };
+                    
+                    if at_terminator {
                         trailing = true;
                         break;
                     }
