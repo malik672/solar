@@ -660,7 +660,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let mut first = true;
         let mut recovered = false;
         let mut trailing = false;
-        let mut v: SmallVec<[T; 2]> = SmallVec::<[T; 2]>::new();
+        let mut v: SmallVec<[T; 10]> = SmallVec::<[T; 10]>::new();
 
         if !allow_empty {
             v.push(f(self)?);
