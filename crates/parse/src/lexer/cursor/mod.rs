@@ -210,6 +210,40 @@ impl<'a> Cursor<'a> {
         RawTokenKind::LineComment { is_doc }
     }
 
+    /// Eats symbols until `ch1` or `ch2` is found or until the end of file is reached.
+    ///
+    /// Returns `true` if `ch1` or `ch2` was found, `false` if the end of file was reached.
+    #[inline]
+    fn eat_until_either(&mut self, ch1: u8, ch2: u8) -> bool {
+        let b = self.as_bytes();
+        let res = if b.len() < 64 {
+            let mut pos = 0;
+            while pos < b.len() {
+                if b[pos] == ch1 || b[pos] == ch2 {
+                    return {
+                        self.ignore_bytes(pos);
+                        true
+                    };
+                }
+                pos += 1;
+            }
+            None
+        } else {
+            memchr::memchr2(ch1, ch2, b)
+        };
+
+        self.ignore_bytes(res.unwrap_or(b.len()));
+        res.is_some()
+    }
+
+    /// Advances `n` bytes.
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    fn ignore_bytes(&mut self, n: usize) {
+        debug_assert!(n <= self.as_bytes().len());
+        self.bytes = unsafe { self.as_bytes().get_unchecked(n..) }.iter();
+    }
+
     #[inline(never)]
     fn block_comment(&mut self) -> RawTokenKind {
         debug_assert!(self.prev() == b'/' && self.first() == b'*');
@@ -459,25 +493,6 @@ impl<'a> Cursor<'a> {
         let c = self.as_bytes().first().copied();
         self.bytes.next();
         c
-    }
-
-    /// Advances `n` bytes.
-    #[inline]
-    #[cfg_attr(debug_assertions, track_caller)]
-    fn ignore_bytes(&mut self, n: usize) {
-        debug_assert!(n <= self.as_bytes().len());
-        self.bytes = unsafe { self.as_bytes().get_unchecked(n..) }.iter();
-    }
-
-    /// Eats symbols until `ch1` or `ch2` is found or until the end of file is reached.
-    ///
-    /// Returns `true` if `ch1` or `ch2` was found, `false` if the end of file was reached.
-    #[inline]
-    fn eat_until_either(&mut self, ch1: u8, ch2: u8) -> bool {
-        let b = self.as_bytes();
-        let res = memchr::memchr2(ch1, ch2, b);
-        self.ignore_bytes(res.unwrap_or(b.len()));
-        res.is_some()
     }
 
     /// Eats symbols while predicate returns true or until the end of file is reached.
