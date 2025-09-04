@@ -12,7 +12,7 @@ pub const DIGIT: u8      = 0b0000_1000;
 pub const HEX_DIGIT: u8  = 0b0001_0000;
 pub const OPERATOR: u8   = 0b0010_0000;
 pub const QUOTE: u8      = 0b0100_0000;
-pub const SPECIAL: u8    = 0b1000_0000; // Comments, delimiters, etc.
+pub const SPECIAL: u8    = 0b1000_0000; 
 
 /// Pre-computed character classification table.
 /// 
