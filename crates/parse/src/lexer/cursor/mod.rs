@@ -232,7 +232,7 @@ impl<'a> Cursor<'a> {
 
     fn whitespace(&mut self) -> RawTokenKind {
         debug_assert!(is_whitespace_byte(self.prev()));
-        self.eat_while(is_whitespace_byte);
+        self.eat_whitespace_simd();
         RawTokenKind::Whitespace
     }
 
@@ -241,7 +241,7 @@ impl<'a> Cursor<'a> {
 
         // Start is already eaten, eat the rest of identifier.
         let start = self.as_ptr();
-        self.eat_while(is_id_continue_byte);
+        self.eat_identifier_simd();
 
         // Check if the identifier is a string literal prefix.
         if unlikely(matches!(first, b'h' | b'u')) {
@@ -273,21 +273,21 @@ impl<'a> Cursor<'a> {
                 b'b' => {
                     base = Base::Binary;
                     self.bump();
-                    self.eat_decimal_digits()
+                    self.eat_decimal_digits_fast()
                 }
                 b'o' => {
                     base = Base::Octal;
                     self.bump();
-                    self.eat_decimal_digits()
+                    self.eat_decimal_digits_fast()
                 }
                 b'x' => {
                     base = Base::Hexadecimal;
                     self.bump();
-                    self.eat_hexadecimal_digits()
+                    self.eat_hexadecimal_digits_fast()
                 }
                 // Not a base prefix.
                 b'0'..=b'9' | b'_' | b'.' | b'e' | b'E' => {
-                    self.eat_decimal_digits();
+                    self.eat_decimal_digits_fast();
                     true
                 }
                 // Just a 0.
@@ -299,7 +299,7 @@ impl<'a> Cursor<'a> {
             }
         } else {
             // No base prefix, parse number in the usual way.
-            self.eat_decimal_digits();
+            self.eat_decimal_digits_fast();
         };
 
         match self.first() {
@@ -321,7 +321,7 @@ impl<'a> Cursor<'a> {
 
     #[cold]
     fn rational_number_after_dot(&mut self, base: Base) -> RawLiteralKind {
-        self.eat_decimal_digits();
+        self.eat_decimal_digits_fast();
         let empty_exponent = match self.first() {
             b'e' | b'E' => {
                 self.bump();
@@ -385,7 +385,7 @@ impl<'a> Cursor<'a> {
         if self.first() == b'-' {
             self.bump();
         }
-        self.eat_decimal_digits()
+        self.eat_decimal_digits_fast()
     }
 
     /// Returns the remaining input as a byte slice.
@@ -478,6 +478,42 @@ impl<'a> Cursor<'a> {
         let res = memchr::memchr2(ch1, ch2, b);
         self.ignore_bytes(res.unwrap_or(b.len()));
         res.is_some()
+    }
+
+    /// SIMD-accelerated whitespace skipping.
+    /// 
+    /// Uses vectorized operations to skip whitespace much faster than the scalar version.
+    fn eat_whitespace_simd(&mut self) {
+        let remaining = self.as_bytes();
+        let skipped = crate::lexer::simd_lexer::skip_whitespace_bulk(remaining);
+        self.ignore_bytes(skipped);
+    }
+
+    /// SIMD-accelerated identifier parsing.
+    /// 
+    /// Uses vectorized operations to find the end of an identifier much faster than scalar.
+    fn eat_identifier_simd(&mut self) {
+        let remaining = self.as_bytes();
+        let length = crate::lexer::simd_lexer::parse_identifier_bulk(remaining);
+        self.ignore_bytes(length);
+    }
+
+    /// Fast decimal digit parsing.
+    fn eat_decimal_digits_fast(&mut self) -> bool {
+        let remaining = self.as_bytes();
+        let length = crate::lexer::simd_lexer::parse_decimal_digits_bulk(remaining);
+        let has_digits = length > 0;
+        self.ignore_bytes(length);
+        has_digits
+    }
+
+    /// Fast hexadecimal digit parsing.
+    fn eat_hexadecimal_digits_fast(&mut self) -> bool {
+        let remaining = self.as_bytes();
+        let length = crate::lexer::simd_lexer::parse_hex_digits_bulk(remaining);
+        let has_digits = length > 0;
+        self.ignore_bytes(length);
+        has_digits
     }
 
     /// Eats symbols while predicate returns true or until the end of file is reached.

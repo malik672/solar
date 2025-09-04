@@ -18,6 +18,10 @@ mod unicode_chars;
 
 mod utf8;
 
+mod char_class_table;
+
+mod simd_lexer;
+
 /// Solidity and Yul lexer.
 ///
 /// Converts a [`Cursor`]'s output from simple [`RawTokenKind`]s into rich [`TokenKind`]s, by
