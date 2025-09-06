@@ -1,35 +1,98 @@
-//! True SIMD lexer functions using memchr's vectorized operations.
+//! Optimized lexer functions using chunked processing and selective memchr usage.
 //!
-//! This module provides SIMD-optimized implementations of lexing operations using
-//! memchr's highly optimized byte searching. memchr uses AVX2/NEON instructions to
-//! achieve significant performance improvements over scalar approaches.
+//! This module provides performance-optimized implementations that avoid the overhead
+//! of full SIMD while still achieving better performance than naive scalar loops.
+//! Uses 4-byte chunked processing and memchr for specific patterns.
 
 use super::char_class_table::{is_whitespace_fast, is_id_continue_fast};
-use memchr::{memchr, memchr2, memchr3};
+use memchr::memchr3;
 
 // =============================================================================
-// TRUE SIMD IMPLEMENTATIONS USING MEMCHR
+// CHUNKED PROCESSING OPTIMIZATIONS
 // =============================================================================
 
-/// Simple, correct whitespace skipping - prioritize correctness over premature optimization.
+/// Optimized whitespace skipping using memchr for large spans.
 /// 
-/// Uses a straightforward approach that can be optimized by the compiler.
+/// Uses memchr's highly optimized search for non-whitespace characters.
 pub fn skip_whitespace_bulk(input: &[u8]) -> usize {
+    if input.is_empty() {
+        return 0;
+    }
+    
+    // For very short inputs, use simple scalar approach
+    if input.len() < 16 {
+        let mut pos = 0;
+        while pos < input.len() && is_whitespace_fast(input[pos]) {
+            pos += 1;
+        }
+        return pos;
+    }
+    
+    // For longer inputs, use a hybrid approach
     let mut pos = 0;
     
-    // Simple loop - let the compiler optimize this
+    // Process initial bytes normally until we find a long whitespace run
     while pos < input.len() && is_whitespace_fast(input[pos]) {
         pos += 1;
+        
+        // If we've found a decent run of whitespace, use memchr for the rest
+        if pos == 8 {
+            // Use memchr to find first non-whitespace efficiently
+            // Look for characters that are definitely not whitespace
+            if let Some(next_pos) = memchr::memchr3(b'a', b'A', b'0', &input[pos..]) {
+                // Found something that might be non-whitespace, verify the boundary
+                let candidate_pos = pos + next_pos;
+                
+                // Scan backwards to find the exact whitespace boundary
+                let mut exact_pos = pos;
+                for i in pos..candidate_pos {
+                    if !is_whitespace_fast(input[i]) {
+                        exact_pos = i;
+                        break;
+                    }
+                    exact_pos = i + 1;
+                }
+                return exact_pos;
+            } else {
+                // No obvious non-whitespace found, finish with scalar
+                while pos < input.len() && is_whitespace_fast(input[pos]) {
+                    pos += 1;
+                }
+                return pos;
+            }
+        }
     }
     
     pos
 }
 
-/// Simple, correct identifier parsing.
+/// Optimized identifier parsing using chunked processing.
+/// 
+/// Processes 4 bytes at a time for better performance on long identifiers.
 pub fn parse_identifier_bulk(input: &[u8]) -> usize {
     let mut pos = 0;
     
-    // Simple correct approach
+    // Fast path: process 4 bytes at a time
+    while pos + 4 <= input.len() {
+        let chunk = &input[pos..pos + 4];
+        
+        // Check all 4 bytes are identifier characters
+        if is_id_continue_fast(chunk[0]) && 
+           is_id_continue_fast(chunk[1]) && 
+           is_id_continue_fast(chunk[2]) && 
+           is_id_continue_fast(chunk[3]) {
+            pos += 4;
+            continue;
+        }
+        
+        // Find the exact boundary
+        if !is_id_continue_fast(chunk[0]) { return pos; }
+        if !is_id_continue_fast(chunk[1]) { return pos + 1; }
+        if !is_id_continue_fast(chunk[2]) { return pos + 2; }
+        return pos + 3; // chunk[3] must be non-identifier
+    }
+    
+    // Handle remaining bytes (0-3)
     while pos < input.len() && is_id_continue_fast(input[pos]) {
         pos += 1;
     }
