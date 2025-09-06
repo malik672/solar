@@ -76,20 +76,32 @@ pub mod attempted_optimizations {
     Result: Performance regression, reverted
     ";
     
-    /// Chunked processing approach - currently active
+    /// Chunked processing approach - reverted due to regressions
     pub const CHUNKED_PROCESSING_ATTEMPT: &str = "
-    Attempted 2025-01-06: Chunked u32 processing without SIMD overhead
-    - Process 4 bytes at a time
+    Attempted 2025-01-06: Chunked u32/u64 processing without SIMD overhead
+    - Process 4-8 bytes at a time
     - Fast path for common patterns (spaces)
-    - Hybrid memchr integration for long whitespace runs
-    Result: Deployed, tests passing
+    - Hybrid memchr integration for long whitespace runs  
+    - Ultra-aggressive SWAR bit manipulation with u64 operations
+    Result: Performance regressions in tests, reverted
+    ";
+    
+    /// SWAR bit manipulation attempt - reverted due to correctness issues
+    pub const SWAR_ATTEMPT: &str = "
+    Attempted 2025-01-06: SWAR (SIMD Within A Register) bit manipulation
+    - u64 word-level processing with unsafe unaligned reads
+    - Parallel bit arithmetic for character validation
+    - Bit-parallel comparison techniques from base64 decoder blog
+    - Pattern matching for common whitespace sequences
+    Result: Significant correctness issues, test failures, reverted
     ";
     
     /// Future optimization candidates
     pub const NEXT_CANDIDATES: &[&str] = &[
-        "Chunked u32/u64 processing without SIMD overhead",
+        "Hand-tuned assembly for hot paths",
         "Better memchr integration for delimiter detection", 
         "Optimized cursor advancement patterns",
         "Cache-friendly token stream layouts",
+        "Profile-guided optimization approaches",
     ];
 }
