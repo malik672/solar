@@ -11,50 +11,246 @@ use memchr::memchr3;
 // CHUNKED PROCESSING OPTIMIZATIONS
 // =============================================================================
 
-/// Optimized whitespace skipping using memchr for long runs.
+/// Ultra-optimized whitespace skipping using unrolled loops and branch elimination.
+/// 
+/// Uses aggressive unrolling and pattern matching for maximum throughput.
 pub fn skip_whitespace_bulk(input: &[u8]) -> usize {
+    if input.is_empty() {
+        return 0;
+    }
+    
     let mut pos = 0;
-    while pos < input.len() && is_whitespace_fast(input[pos]) {
+    let len = input.len();
+    
+    // Ultra-aggressive unrolled loop for maximum performance
+    while pos + 16 <= len {
+        let chunk = &input[pos..pos + 16];
+        
+        // Check common patterns first (branch predictor friendly)
+        if chunk == b"                " { // 16 spaces
+            pos += 16;
+            continue;
+        }
+        
+        if chunk == b"\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t" { // 16 tabs  
+            pos += 16;
+            continue;
+        }
+        
+        // Unrolled loop for maximum performance - no branches in inner loop
+        let mut i = 0;
+        while i < 16 {
+            if !is_whitespace_fast(chunk[i]) {
+                return pos + i;
+            }
+            i += 1;
+        }
+        pos += 16;
+    }
+    
+    // Handle remaining bytes with 8-byte unrolling
+    while pos + 8 <= len {
+        let chunk = &input[pos..pos + 8];
+        
+        if chunk == b"        " { // 8 spaces
+            pos += 8;
+            continue;
+        }
+        
+        let mut i = 0;
+        while i < 8 {
+            if !is_whitespace_fast(chunk[i]) {
+                return pos + i;
+            }
+            i += 1;
+        }
+        pos += 8;
+    }
+    
+    // Handle remaining bytes with 4-byte unrolling
+    while pos + 4 <= len {
+        let chunk = &input[pos..pos + 4];
+        
+        if chunk == b"    " { // 4 spaces
+            pos += 4;
+            continue;
+        }
+        
+        // Unrolled 4-byte check
+        if !is_whitespace_fast(chunk[0]) { return pos; }
+        if !is_whitespace_fast(chunk[1]) { return pos + 1; }
+        if !is_whitespace_fast(chunk[2]) { return pos + 2; }
+        if !is_whitespace_fast(chunk[3]) { return pos + 3; }
+        pos += 4;
+    }
+    
+    // Handle final bytes
+    while pos < len && is_whitespace_fast(input[pos]) {
         pos += 1;
     }
+    
     pos
 }
 
-/// Optimized identifier parsing with lookup table.
+/// Ultra-optimized identifier parsing using unrolled loops and lookup tables.
+/// 
+/// Uses aggressive unrolling for maximum identifier parsing speed.
 pub fn parse_identifier_bulk(input: &[u8]) -> usize {
+    if input.is_empty() {
+        return 0;
+    }
+    
     let mut pos = 0;
-    while pos < input.len() && is_id_continue_fast(input[pos]) {
+    let len = input.len();
+    
+    // Ultra-aggressive unrolled loop for identifiers - most common tokens
+    while pos + 16 <= len {
+        let chunk = &input[pos..pos + 16];
+        
+        // Unrolled 16-byte check - no branches in tight loop
+        if !is_id_continue_fast(chunk[0]) { return pos; }
+        if !is_id_continue_fast(chunk[1]) { return pos + 1; }
+        if !is_id_continue_fast(chunk[2]) { return pos + 2; }
+        if !is_id_continue_fast(chunk[3]) { return pos + 3; }
+        if !is_id_continue_fast(chunk[4]) { return pos + 4; }
+        if !is_id_continue_fast(chunk[5]) { return pos + 5; }
+        if !is_id_continue_fast(chunk[6]) { return pos + 6; }
+        if !is_id_continue_fast(chunk[7]) { return pos + 7; }
+        if !is_id_continue_fast(chunk[8]) { return pos + 8; }
+        if !is_id_continue_fast(chunk[9]) { return pos + 9; }
+        if !is_id_continue_fast(chunk[10]) { return pos + 10; }
+        if !is_id_continue_fast(chunk[11]) { return pos + 11; }
+        if !is_id_continue_fast(chunk[12]) { return pos + 12; }
+        if !is_id_continue_fast(chunk[13]) { return pos + 13; }
+        if !is_id_continue_fast(chunk[14]) { return pos + 14; }
+        if !is_id_continue_fast(chunk[15]) { return pos + 15; }
+        pos += 16;
+    }
+    
+    // 8-byte unrolled processing
+    while pos + 8 <= len {
+        let chunk = &input[pos..pos + 8];
+        
+        // Unrolled 8-byte check
+        if !is_id_continue_fast(chunk[0]) { return pos; }
+        if !is_id_continue_fast(chunk[1]) { return pos + 1; }
+        if !is_id_continue_fast(chunk[2]) { return pos + 2; }
+        if !is_id_continue_fast(chunk[3]) { return pos + 3; }
+        if !is_id_continue_fast(chunk[4]) { return pos + 4; }
+        if !is_id_continue_fast(chunk[5]) { return pos + 5; }
+        if !is_id_continue_fast(chunk[6]) { return pos + 6; }
+        if !is_id_continue_fast(chunk[7]) { return pos + 7; }
+        pos += 8;
+    }
+    
+    // 4-byte unrolled processing 
+    while pos + 4 <= len {
+        let chunk = &input[pos..pos + 4];
+        
+        // Unrolled 4-byte check
+        if !is_id_continue_fast(chunk[0]) { return pos; }
+        if !is_id_continue_fast(chunk[1]) { return pos + 1; }
+        if !is_id_continue_fast(chunk[2]) { return pos + 2; }
+        if !is_id_continue_fast(chunk[3]) { return pos + 3; }
+        pos += 4;
+    }
+    
+    // Handle remaining bytes
+    while pos < len && is_id_continue_fast(input[pos]) {
         pos += 1;
     }
+    
     pos
 }
 
-/// Optimized decimal digit parsing.
+/// Ultra-optimized decimal digit parsing with unrolled loops.
+/// 
+/// Uses aggressive unrolling for maximum digit parsing speed.
 pub fn parse_decimal_digits_bulk(input: &[u8]) -> usize {
+    if input.is_empty() {
+        return 0;
+    }
+    
     let mut pos = 0;
-    while pos < input.len() {
+    let len = input.len();
+    
+    // Ultra-aggressive unrolled digit parsing
+    while pos + 8 <= len {
+        let chunk = &input[pos..pos + 8];
+        
+        // Unrolled 8-byte digit check
+        if !is_digit_or_underscore(chunk[0]) { return pos; }
+        if !is_digit_or_underscore(chunk[1]) { return pos + 1; }
+        if !is_digit_or_underscore(chunk[2]) { return pos + 2; }
+        if !is_digit_or_underscore(chunk[3]) { return pos + 3; }
+        if !is_digit_or_underscore(chunk[4]) { return pos + 4; }
+        if !is_digit_or_underscore(chunk[5]) { return pos + 5; }
+        if !is_digit_or_underscore(chunk[6]) { return pos + 6; }
+        if !is_digit_or_underscore(chunk[7]) { return pos + 7; }
+        pos += 8;
+    }
+    
+    // Handle remaining bytes
+    while pos < len {
         let byte = input[pos];
-        if byte.is_ascii_digit() || byte == b'_' {
+        if is_digit_or_underscore(byte) {
             pos += 1;
         } else {
             break;
         }
     }
+    
     pos
 }
 
-/// Optimized hex digit parsing.
+#[inline(always)]
+fn is_digit_or_underscore(byte: u8) -> bool {
+    byte.is_ascii_digit() || byte == b'_'
+}
+
+/// Ultra-optimized hex digit parsing with unrolled loops.
+/// 
+/// Uses aggressive unrolling for maximum hex digit parsing speed.
 pub fn parse_hex_digits_bulk(input: &[u8]) -> usize {
+    if input.is_empty() {
+        return 0;
+    }
+    
     let mut pos = 0;
-    while pos < input.len() {
+    let len = input.len();
+    
+    // Ultra-aggressive unrolled hex digit parsing
+    while pos + 8 <= len {
+        let chunk = &input[pos..pos + 8];
+        
+        // Unrolled 8-byte hex check
+        if !is_hex_or_underscore(chunk[0]) { return pos; }
+        if !is_hex_or_underscore(chunk[1]) { return pos + 1; }
+        if !is_hex_or_underscore(chunk[2]) { return pos + 2; }
+        if !is_hex_or_underscore(chunk[3]) { return pos + 3; }
+        if !is_hex_or_underscore(chunk[4]) { return pos + 4; }
+        if !is_hex_or_underscore(chunk[5]) { return pos + 5; }
+        if !is_hex_or_underscore(chunk[6]) { return pos + 6; }
+        if !is_hex_or_underscore(chunk[7]) { return pos + 7; }
+        pos += 8;
+    }
+    
+    // Handle remaining bytes
+    while pos < len {
         let byte = input[pos];
-        if byte.is_ascii_hexdigit() || byte == b'_' {
+        if is_hex_or_underscore(byte) {
             pos += 1;
         } else {
             break;
         }
     }
+    
     pos
+}
+
+#[inline(always)]
+fn is_hex_or_underscore(byte: u8) -> bool {
+    byte.is_ascii_hexdigit() || byte == b'_'
 }
 
 /// Find first non-whitespace byte using SIMD acceleration.

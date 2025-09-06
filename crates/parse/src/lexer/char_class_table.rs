@@ -70,25 +70,25 @@ pub const CHAR_CLASS_TABLE: [u8; 256] = {
 };
 
 /// Fast character classification using lookup table.
-#[inline]
+#[inline(always)]
 pub const fn classify_byte(c: u8) -> u8 {
     CHAR_CLASS_TABLE[c as usize]
 }
 
 /// Check if character is whitespace using lookup table.
-#[inline]
+#[inline(always)]
 pub const fn is_whitespace_fast(c: u8) -> bool {
     (classify_byte(c) & WHITESPACE) != 0
 }
 
 /// Check if character can start an identifier using lookup table.
-#[inline]
+#[inline(always)]
 pub const fn is_id_start_fast(c: u8) -> bool {
     (classify_byte(c) & ID_START) != 0
 }
 
 /// Check if character can continue an identifier using lookup table.
-#[inline]
+#[inline(always)]
 pub const fn is_id_continue_fast(c: u8) -> bool {
     (classify_byte(c) & ID_CONTINUE) != 0
 }
