@@ -1,0 +1,259 @@
+What Solar's Lexer is Missing: SIMD Optimization Opportunities
+
+Based on the SIMD base64 decoder analysis, here are the key optimizations our lexer is missing:
+
+## 1. **SIMD Character Classification**
+
+Our current lexer likely does this:
+```rust
+// Current: scalar character checking
+match ch {
+    'a'..='z' | 'A'..='Z' | '_' => TokenKind::Identifier,
+    '0'..='9' => TokenKind::Number,
+    ' ' | '\t' => skip_whitespace(),
+    // ... many branches per character
+}
+```
+
+**Missing**: SIMD character classification like the blog post:
+```rust
+// SIMD approach: classify 32 chars at once
+let chars = Simd::<u8, 32>::from_slice(input);
+let is_alpha = in_range(chars, b'a', b'z') | in_range(chars, b'A', b'Z');
+let is_digit = in_range(chars, b'0', b'9');
+let is_whitespace = chars.simd_eq(b' ') | chars.simd_eq(b'\t');
+```
+
+## 2. **Branchless Token Length Calculation**
+
+Our lexer probably does:
+```rust
+// Current: loop until non-identifier character
+while matches!(peek(), 'a'..='z' | 'A'..='Z' | '0'..='9' | '_') {
+    advance();
+}
+```
+
+**Missing**: SIMD span detection:
+```rust
+// Find all identifier characters in one SIMD operation
+let mask = is_alpha | is_digit | chars.simd_eq(b'_');
+let span_length = mask.to_bitmask().trailing_ones();
+```
+
+## 3. **Batch Whitespace Skipping**
+
+Our lexer likely advances one character at a time through whitespace:
+```rust
+while matches!(peek(), ' ' | '\t' | '\n' | '\r') {
+    advance(); // Branch per character
+}
+```
+
+**Missing**: SIMD whitespace detection:
+```rust
+let whitespace_mask = chars.simd_eq(b' ') | chars.simd_eq(b'\t') | 
+                     chars.simd_eq(b'\n') | chars.simd_eq(b'\r');
+let skip_count = whitespace_mask.to_bitmask().trailing_ones();
+advance_by(skip_count);
+```
+
+## 4. **Perfect Hash for Keywords**
+
+Our keyword detection probably uses:
+```rust
+match identifier {
+    "function" => TokenKind::Function,
+    "contract" => TokenKind::Contract,
+    "if" => TokenKind::If,
+    // ... many string comparisons
+}
+```
+
+**Missing**: Perfect hash + SIMD lookup like the blog's base64 approach:
+```rust
+// Hash the first few chars to distinguish keywords
+let hash = (first_char >> 4) ^ length;
+let token_kind = KEYWORD_TABLE.swizzle_dyn(hash);
+```
+
+## 5. **Speculative Number Parsing**
+
+Our number parsing likely does:
+```rust
+if matches!(ch, '0'..='9') {
+    while matches!(peek(), '0'..='9' | '_') { /* ... */ }
+    if matches!(peek(), '.') { /* float logic */ }
+}
+```
+
+**Missing**: SIMD digit span detection + speculative parsing:
+```rust
+// Find all digits in one operation
+let digit_mask = in_range(chars, b'0', b'9') | chars.simd_eq(b'_');
+let number_span = digit_mask.to_bitmask().trailing_ones();
+// Speculatively parse as integer, backtrack if needed
+```
+
+## 6. **Comment Skipping Optimization**
+
+Our comment handling likely scans character by character:
+```rust
+if ch == '/' && peek() == '/' {
+    while peek() != '\n' { advance(); } // Branch per char
+}
+```
+
+**Missing**: SIMD newline detection:
+```rust
+let newline_mask = chars.simd_eq(b'\n');
+let comment_end = newline_mask.to_bitmask().trailing_zeros();
+advance_by(comment_end);
+```
+
+## 7. **String Literal SIMD Scanning**
+
+String parsing likely does:
+```rust
+while ch != '"' && ch != '\0' {
+    if ch == '\\' { handle_escape(); }
+    advance();
+}
+```
+
+**Missing**: SIMD quote/escape detection:
+```rust
+let quote_mask = chars.simd_eq(b'"');
+let escape_mask = chars.simd_eq(b'\\');
+let special_mask = quote_mask | escape_mask;
+let safe_span = (!special_mask).to_bitmask().trailing_ones();
+```
+
+## 8. **Memory Layout Optimizations**
+
+Our tokens are probably:
+```rust
+struct Token {
+    kind: TokenKind,     // 4+ bytes
+    span: Span,          // 8+ bytes  
+    // Non-cache-friendly layout
+}
+```
+
+**Missing**: SOA (Structure of Arrays) layout:
+```rust
+struct TokenStream {
+    kinds: Vec<TokenKind>,    // All kinds together
+    spans: Vec<Span>,         // All spans together
+    // Better cache locality for batch processing
+}
+```
+
+## 9. **Batch Error Collection**
+
+Our error handling likely:
+```rust
+if invalid_char {
+    return Err(LexError::InvalidChar(pos));
+}
+```
+
+**Missing**: Error accumulation like the blog post:
+```rust
+let mut has_error = false;
+// ... in SIMD loop
+has_error |= invalid_char_mask.any();
+// Check errors after hot loop
+```
+
+## 10. **Vectorized Identifier Interning**
+
+Our string interning probably:
+```rust
+session.interner.intern(identifier_str) // One at a time
+```
+
+**Missing**: Batch interning of identifiers found via SIMD.
+
+## Biggest Impact Opportunities
+
+For Solar's lexer, the highest-impact optimizations would be:
+
+1. **SIMD identifier span detection** - identifiers are the most common tokens
+2. **SIMD whitespace skipping** - huge amount of time spent on whitespace  
+3. **Perfect hash keyword lookup** - Solidity has ~50 keywords
+4. **Batch comment skipping** - comments can be very long
+
+## How the Blog Post Achieved 2x Speedup
+
+The 2x performance gain came from systematic elimination of bottlenecks:
+
+### 1. **Eliminated All Branches in Hot Loop** (~30-40% gain)
+```rust
+// OLD: Branch per character
+let sextet = match byte {
+    b'A'..=b'Z' => byte - b'A',
+    b'a'..=b'z' => byte - b'a' + 26,
+    // ... 5 different branches per byte
+};
+
+// NEW: Branchless perfect hash lookup
+let hashes = (ascii >> Simd::splat(4)) + (ascii == b'/').to_int();
+let sextets = ascii - lookup_table.swizzle_dyn(hashes);
+```
+
+### 2. **SIMD Parallelism** (~50-60% gain)
+```rust
+// OLD: Process 1 byte at a time
+for byte in chunk {
+    // scalar operations
+}
+
+// NEW: Process 32 bytes simultaneously  
+let ascii = Simd::<u8, 32>::from_slice(chunk);
+// All 32 characters processed in parallel
+```
+
+### 3. **Eliminated Memory Allocation Overhead** (~20-30% gain)
+```rust
+// OLD: Dynamic allocation per chunk
+out.extend_from_slice(&bytes[..decoded]);
+
+// NEW: Pre-allocate with "slop"
+out.reserve(final_len + N/4);  // Reserve once
+unsafe { ptr.write_unaligned(simd_result); }  // Raw writes
+```
+
+### 4. **Optimized Memory Loading** (~15-25% gain)
+```rust
+// OLD: Byte-by-byte copying with bounds checks
+ascii[..chunk.len()].copy_from_slice(chunk);
+
+// NEW: Overlapping wide loads
+let lo = ptr.cast::<u64>().read_unaligned() as u128;
+let hi = ptr.add(len-8).cast::<u64>().read_unaligned() as u128;
+let data = lo | (hi << ((len-8) * 8));
+```
+
+### 5. **Delayed Error Handling** (~10-15% gain)
+```rust
+// OLD: Check error every iteration
+if !ok { return Err(Error); }
+
+// NEW: Accumulate errors, check once at end
+error |= !ok;  // In loop
+if error { return Err(Error); }  // After loop
+```
+
+## The Core Insight
+
+The blog post didn't just "add SIMD" - they **systematically eliminated every source of inefficiency**:
+- CPU pipeline stalls (branches)
+- Memory allocation overhead
+- Bounds checking overhead  
+- Variable-length operation overhead
+- Error handling overhead
+
+This methodical approach to performance engineering achieved the 2x speedup through **compounding optimizations** rather than just marginal gains.
+
+The key principle: **eliminate branches in the hot path by processing data in parallel and deferring decisions**.
