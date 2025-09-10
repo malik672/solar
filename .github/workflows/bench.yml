@@ -10,7 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  codspeed:
+  # Generic baseline job (portable, reproducible)
+  codspeed-baseline:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -29,6 +30,33 @@ jobs:
       - name: Build the benchmark target(s)
         run: cargo codspeed build --profile profiling -p solar-bench criterion
       - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v3
+        with:
+          run: cargo codspeed run -p solar-bench criterion
+          token: ${{ secrets.CODSPEED_TOKEN }}
+
+  # SIMD-optimized job with runtime feature detection
+  codspeed-simd:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C target-cpu=native"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - name: Checkout submodules
+        run: git submodule update --checkout
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Install cargo-codspeed
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed
+      - name: Build SIMD benchmark target(s)
+        run: cargo codspeed build --profile profiling -p solar-bench criterion
+      - name: Run SIMD benchmarks
         uses: CodSpeedHQ/action@v3
         with:
           run: cargo codspeed run -p solar-bench criterion
