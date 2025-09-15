@@ -1,5 +1,5 @@
 use crate::{
-    ColorChoice, SessionGlobals, SourceMap,
+    ByteSymbol, ColorChoice, SessionGlobals, SourceMap, Symbol,
     diagnostics::{DiagCtxt, EmittedDiagnostics},
 };
 use solar_config::{CompilerOutput, CompilerStage, Opts, SINGLE_THREADED_TARGET, UnstableOpts};
@@ -162,16 +162,8 @@ impl SessionBuilder {
             opts: opts.unwrap_or_default(),
             thread_pool: OnceLock::new(),
         };
-
-        if let Some(base_path) =
-            sess.opts.base_path.clone().or_else(|| std::env::current_dir().ok())
-            && let Ok(base_path) = sess.source_map().file_loader().canonicalize_path(&base_path)
-        {
-            sess.source_map().set_base_path(base_path);
-        }
-
+        sess.reconfigure();
         debug!(version = %solar_config::version::SEMVER_VERSION, "created new session");
-
         sess
     }
 }
@@ -204,6 +196,26 @@ impl Session {
         let mut result = Ok(());
         result = result.and(self.check_unique("emit", &self.opts.emit));
         result
+    }
+
+    /// Reconfigures inner state to match any new options.
+    ///
+    /// Call this after updating options.
+    pub fn reconfigure(&self) {
+        'bp: {
+            let new_base_path = if self.opts.unstable.ui_testing {
+                // `ui_test` relies on absolute paths.
+                None
+            } else if let Some(base_path) =
+                self.opts.base_path.clone().or_else(|| std::env::current_dir().ok())
+                && let Ok(base_path) = self.source_map().file_loader().canonicalize_path(&base_path)
+            {
+                Some(base_path)
+            } else {
+                break 'bp;
+            };
+            self.source_map().set_base_path(new_base_path);
+        }
     }
 
     fn check_unique<T: Eq + std::hash::Hash + std::fmt::Display>(
@@ -367,7 +379,7 @@ impl Session {
                 return self.enter_sequential(f);
             }
             // Avoid creating a new thread pool if it's already set up with the same globals.
-            if self.is_set() {
+            if self.is_entered() {
                 // No need to set again.
                 return f();
             }
@@ -389,8 +401,44 @@ impl Session {
         self.globals.set(f)
     }
 
-    /// Returns `true` if the session globals are already set to this instance's.
-    fn is_set(&self) -> bool {
+    /// Interns a string in this session's symbol interner.
+    ///
+    /// The symbol may not be usable on its own if the session has not been [entered](Self::enter).
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn intern(&self, s: &str) -> Symbol {
+        self.globals.symbol_interner.intern(s)
+    }
+
+    /// Resolves a symbol to its string representation.
+    ///
+    /// The given symbol must have been interned in this session.
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn resolve_symbol(&self, s: Symbol) -> &str {
+        self.globals.symbol_interner.get(s)
+    }
+
+    /// Interns a byte string in this session's symbol interner.
+    ///
+    /// The symbol may not be usable on its own if the session has not been [entered](Self::enter).
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn intern_byte_str(&self, s: &[u8]) -> ByteSymbol {
+        self.globals.symbol_interner.intern_byte_str(s)
+    }
+
+    /// Resolves a byte symbol to its string representation.
+    ///
+    /// The given symbol must have been interned in this session.
+    #[inline]
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn resolve_byte_str(&self, s: ByteSymbol) -> &[u8] {
+        self.globals.symbol_interner.get_byte_str(s)
+    }
+
+    /// Returns `true` if this session has been entered.
+    pub fn is_entered(&self) -> bool {
         SessionGlobals::try_with(|g| g.is_some_and(|g| g.maybe_eq(&self.globals)))
     }
 
