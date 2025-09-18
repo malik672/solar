@@ -1354,8 +1354,7 @@ dependencies = [
 [[package]]
 name = "inturn"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2efbe120e37f17bb33fcdc82bc1c65087242608be37ace3cf7ebf49f3164e37"
+source = "git+https://github.com/malik672/inturn?branch=follow_me#32d92b712a9478d1427db687b062c335fef8d580"
 dependencies = [
  "boxcar",
  "bumpalo",
