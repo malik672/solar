@@ -336,7 +336,7 @@ impl<'gcx> Gcx<'gcx> {
     }
 
     pub fn mk_ty_string_literal(self, s: &[u8]) -> Ty<'gcx> {
-        println!("{:?}", s);
+        eprintln!("STRING LITERAL: len={}, data={:?}", s.len(), s);
         self.mk_ty(TyKind::StringLiteral(
             std::str::from_utf8(s).is_ok(),
             TypeSize::new(s.len().min(32) as u8).unwrap(),
