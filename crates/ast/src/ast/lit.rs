@@ -118,6 +118,7 @@ impl fmt::Debug for LitKind<'_> {
                 write!(f, "{kind:?}(")?;
                 let value = value.as_byte_str();
                 if let Ok(utf8) = std::str::from_utf8(value) {
+                    eprintln!("LITERAL DEBUG: len={}", value.len());
                     write!(f, "{utf8:?}")?;
                 } else {
                     f.write_str(&alloy_primitives::hex::encode_prefixed(value))?;
