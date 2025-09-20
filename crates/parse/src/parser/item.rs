@@ -1055,6 +1055,7 @@ impl<'p, 'sess, 'ast> SemverVersionParser<'p, 'sess, 'ast> {
     }
 
     fn current_char(&self) -> Option<char> {
+        eprintln!("PARSER CHAR ITERATION CALLED");
         self.current_str()?.chars().next()
     }
 

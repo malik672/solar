@@ -301,6 +301,7 @@ impl SourceMap {
         get_src: impl FnOnce() -> io::Result<String>,
     ) -> io::Result<Arc<SourceFile>> {
         let id = SourceFileId::new(&filename);
+        eprintln!("ONCE_MAP CACHE ACCESS: {:?}", filename);
         self.id_to_file.try_insert_cloned(id, |&id| {
             let file = SourceFile::new(filename, id, get_src()?)?;
             self.append_source_file(file)

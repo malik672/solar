@@ -210,7 +210,6 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
             *swallow_next_invalid -= 1;
             return None;
         }
-        eprintln!("LEXER CHAR ITERATION CALLED");
         let mut it = self.str_from_to_end(start).chars();
         let c = it.next().unwrap();
         if c == '\u{00a0}' {
