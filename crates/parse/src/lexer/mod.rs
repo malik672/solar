@@ -210,7 +210,12 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
             *swallow_next_invalid -= 1;
             return None;
         }
+        let start_time = std::time::Instant::now();
         let mut it = self.str_from_to_end(start).chars();
+        let chars_time = start_time.elapsed();
+        if chars_time.as_nanos() > 1000 {
+            eprintln!("CHARS VALIDATION: {:?}", chars_time);
+        }
         let c = it.next().unwrap();
         if c == '\u{00a0}' {
             // If an error has already been reported on non-breaking
