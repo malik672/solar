@@ -82,7 +82,7 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
     #[instrument(name = "lex", level = "debug", skip_all)]
     pub fn into_tokens(mut self) -> Vec<Token> {
         // This is an estimate of the number of tokens in the source.
-        let mut tokens = Vec::with_capacity(self.src.len() / 4);
+        let mut tokens = Vec::with_capacity(self.src.len() / 8);
         println!("Lexing {} bytes", self.src.len());
         let mut  i = 0;
         let mut i_false = 0;
