@@ -90,7 +90,6 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
         loop {
             i += 1;
             let token = self.slop();
-            println!("  Token: {:?}", token);
             if token.is_eof() {
                 i_false += 1;
                 break;
