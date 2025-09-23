@@ -83,16 +83,26 @@ impl<'sess, 'src> Lexer<'sess, 'src> {
     pub fn into_tokens(mut self) -> Vec<Token> {
         // This is an estimate of the number of tokens in the source.
         let mut tokens = Vec::with_capacity(self.src.len() / 4);
+        println!("Lexing {} bytes", self.src.len());
+        let mut  i = 0;
+        let mut i_false = 0;
+        let mut i_true = 0;
         loop {
+            i += 1;
             let token = self.slop();
+            println!("  Token: {:?}", token);
             if token.is_eof() {
+                i_false += 1;
                 break;
             }
             if token.is_comment() {
+                 i_true += 1;
                 continue;
             }
             tokens.push(token);
         }
+        println!("  Total tokens: {}, comments skipped: {}", tokens.len(), i_true);
+        println!("  Total iterations: {}, ended on eof: {}", i, i_false);
         trace!(
             src.len = self.src.len(),
             tokens.len = tokens.len(),
