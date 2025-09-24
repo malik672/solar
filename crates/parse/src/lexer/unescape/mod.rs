@@ -135,14 +135,15 @@ fn needs_unescape(src: &str, kind: StrKind) -> bool {
     }
 }
 
-fn scan_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
+pub fn scan_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
     // Previous character was '\\', unescape what follows.
     // https://docs.soliditylang.org/en/latest/grammar.html#a4.SolidityLexer.EscapeSequence
     // Note that hex and unicode escape codes are not validated since string literals are allowed
     // to contain invalid UTF-8.
+    println!("angel");
     Ok(match chars.next().ok_or(EscapeError::LoneSlash)? {
         // Both quotes are always valid escapes.
-        '\'' => '\'' as u32,
+        '\'' => '\'' as u32,//angel
         '"' => '"' as u32,
 
         '\\' => '\\' as u32,

@@ -112,6 +112,7 @@ fn check_duplicate_definitions(gcx: Gcx<'_>, scope: &Declarations) {
 
     let mut reported = FxHashSet::default();
     for (_name, decls) in scope.iter() {
+
         if decls.len() <= 1 {
             continue;
         }
@@ -142,6 +143,7 @@ fn check_duplicate_definitions(gcx: Gcx<'_>, scope: &Declarations) {
         }
     }
 }
+
 
 fn same_external_params<'gcx>(gcx: Gcx<'gcx>, a: Ty<'gcx>, b: Ty<'gcx>) -> bool {
     let key = |ty: Ty<'gcx>| ty.as_externally_callable_function(gcx).parameters().unwrap();
