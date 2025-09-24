@@ -18,7 +18,6 @@ pub fn parse_string_literal<'a>(
     lit_span: Span,
     sess: &Session,
 ) -> (Cow<'a, [u8]>, bool) {
-    println!("Parsing string literal: {:?}", src);
     let mut has_error = false;
     let content_start = lit_span.lo() + BytePos(1) + BytePos(kind.prefix().len() as u32);
     let bytes = try_parse_string_literal(src, kind, |range, error| {
@@ -40,8 +39,10 @@ where
     F: FnMut(Range<usize>, EscapeError),
 {
     let mut bytes = if needs_unescape(src, kind) {
+        println!("true");
         Cow::Owned(parse_literal_unescape(src, kind, f))
     } else {
+         println!("false");
         Cow::Borrowed(src.as_bytes())
     };
     if kind == StrKind::Hex {
@@ -50,6 +51,7 @@ where
             bytes = Cow::Owned(decoded);
         }
     }
+    println!("Unescaped bytes: {:?}", bytes);
     bytes
 }
 
