@@ -18,6 +18,7 @@ pub fn parse_string_literal<'a>(
     lit_span: Span,
     sess: &Session,
 ) -> (Cow<'a, [u8]>, bool) {
+    println!("Parsing string literal: {:?}", src);
     let mut has_error = false;
     let content_start = lit_span.lo() + BytePos(1) + BytePos(kind.prefix().len() as u32);
     let bytes = try_parse_string_literal(src, kind, |range, error| {
@@ -135,15 +136,14 @@ fn needs_unescape(src: &str, kind: StrKind) -> bool {
     }
 }
 
-pub fn scan_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
+fn scan_escape(chars: &mut Chars<'_>) -> Result<u32, EscapeError> {
     // Previous character was '\\', unescape what follows.
     // https://docs.soliditylang.org/en/latest/grammar.html#a4.SolidityLexer.EscapeSequence
     // Note that hex and unicode escape codes are not validated since string literals are allowed
     // to contain invalid UTF-8.
-    println!("angel");
     Ok(match chars.next().ok_or(EscapeError::LoneSlash)? {
         // Both quotes are always valid escapes.
-        '\'' => '\'' as u32,//angel
+        '\'' => '\'' as u32,
         '"' => '"' as u32,
 
         '\\' => '\\' as u32,
