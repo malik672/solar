@@ -39,10 +39,8 @@ where
     F: FnMut(Range<usize>, EscapeError),
 {
     let mut bytes = if needs_unescape(src, kind) {
-        println!("true");
         Cow::Owned(parse_literal_unescape(src, kind, f))
     } else {
-         println!("false");
         Cow::Borrowed(src.as_bytes())
     };
     if kind == StrKind::Hex {
@@ -51,7 +49,6 @@ where
             bytes = Cow::Owned(decoded);
         }
     }
-    println!("Unescaped bytes: {:?}", bytes);
     bytes
 }
 
