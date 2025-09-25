@@ -267,6 +267,7 @@ where
         callback(0..2, Err(EscapeError::HexPrefix));
     }
 
+    println!("maybe not tonight");
     let count = chars.clone().filter(|(_, c)| c.is_ascii_hexdigit()).count();
     if !count.is_multiple_of(2) {
         callback(0..src.len(), Err(EscapeError::HexOddDigits));
