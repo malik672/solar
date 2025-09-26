@@ -649,7 +649,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let mut v = SmallVec::<[T; 8]>::new();
 
        let d = std::mem::size_of::<Self>();
-       println!("Size of Parser struct: {:?} bytes", d);
+       
         if !allow_empty {
             v.push(f(self)?);
             first = false;
@@ -703,8 +703,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         }
 
         let x = self.alloc_smallvec(v);
-          println!("Parsed {a} items");
- 
+ println!("Size of Parser struct: {:?} bytes", d);
         Ok((x, recovered))
 
       
