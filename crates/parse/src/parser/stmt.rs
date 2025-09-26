@@ -49,7 +49,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             Ok(StmtKind::Return(expr))
         } else if self.eat_keyword(kw::Throw) {
             let msg = "`throw` statements have been removed; use `revert`, `require`, or `assert` instead";
-            Err(self.dcx().err(msg).span(self.core.prev_token.span))
+            Err(self.dcx().err(msg).span(self.prev_token.span))
         } else if self.eat_keyword(kw::Try) {
             semi = false;
             self.parse_stmt_try().map(|stmt| StmtKind::Try(self.alloc(stmt)))
@@ -76,9 +76,9 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Parses a block of statements.
     pub(super) fn parse_block(&mut self) -> PResult<'sess, Block<'ast>> {
-        let lo = self.core.token.span;
+        let lo = self.token.span;
         self.parse_delim_seq(Delimiter::Brace, SeqSep::none(), true, Self::parse_stmt)
-            .map(|stmts| Block { span: lo.to(self.core.prev_token.span), stmts })
+            .map(|stmts| Block { span: lo.to(self.prev_token.span), stmts })
     }
 
     /// Parses an if statement.
@@ -137,17 +137,17 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let expr = self.parse_expr()?;
         let mut clauses = SmallVec::<[_; 4]>::new();
 
-        let mut lo = self.core.token.span;
+        let mut lo = self.token.span;
         let returns = if self.eat_keyword(kw::Returns) {
             self.parse_parameter_list(false, VarFlags::FUNCTION)?
         } else {
             Default::default()
         };
         let block = self.parse_block()?;
-        let span = lo.to(self.core.prev_token.span);
+        let span = lo.to(self.prev_token.span);
         clauses.push(TryCatchClause { name: None, args: returns, block, span });
 
-        lo = self.core.token.span;
+        lo = self.token.span;
         self.expect_keyword(kw::Catch)?;
         loop {
             let name = self.parse_ident_opt()?;
@@ -157,9 +157,9 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 Default::default()
             };
             let block = self.parse_block()?;
-            let span = lo.to(self.core.prev_token.span);
+            let span = lo.to(self.prev_token.span);
             clauses.push(TryCatchClause { name, args, block, span });
-            lo = self.core.token.span;
+            lo = self.token.span;
             if !self.eat_keyword(kw::Catch) {
                 break;
             }
@@ -195,7 +195,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     ///
     /// Also used in the for loop initializer. Does not parse the trailing semicolon.
     fn parse_simple_stmt_kind(&mut self) -> PResult<'sess, StmtKind<'ast>> {
-        let lo = self.core.token.span;
+        let lo = self.token.span;
         if likely(!self.eat(TokenKind::OpenDelim(Delimiter::Parenthesis))) {
             let (statement_type, iap) = self.try_parse_iap()?;
             match statement_type {
@@ -242,7 +242,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                         Self::parse_expr,
                     )?;
                     let partially_parsed = Expr {
-                        span: lo.to(self.core.prev_token.span),
+                        span: lo.to(self.prev_token.span),
                         kind: ExprKind::Tuple(self.alloc_smallvec(components)),
                     };
                     self.parse_expr_with(Some(self.alloc(partially_parsed))).map(StmtKind::Expr)
@@ -306,8 +306,8 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         }
 
         let iap = self.parse_iap()?;
-        let ty = if self.core.token.is_non_reserved_ident(self.core.in_yul)
-            || self.core.token.is_location_specifier()
+        let ty = if self.token.is_non_reserved_ident(self.flags.in_yul())
+            || self.token.is_location_specifier()
         {
             // `a.b memory`, `a[b] c`
             LookAheadInfo::VariableDeclaration
@@ -319,16 +319,16 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     fn peek_statement_type(&mut self) -> LookAheadInfo {
         // https://github.com/argotorg/solidity/blob/194b114664c7daebc2ff68af3c573272f5d28913/libsolidity/parsing/Parser.cpp#L2528
-        if self.core.token.is_keyword_any(&[kw::Mapping, kw::Function]) {
+        if self.token.is_keyword_any(&[kw::Mapping, kw::Function]) {
             return LookAheadInfo::VariableDeclaration;
         }
 
         if self.check_nr_ident() || self.check_elementary_type() {
             let next = self.look_ahead(1);
-            if self.core.token.is_elementary_type() && next.is_ident_where(|id| id.name == kw::Payable) {
+            if self.token.is_elementary_type() && next.is_ident_where(|id| id.name == kw::Payable) {
                 return LookAheadInfo::VariableDeclaration;
             }
-            if next.is_non_reserved_ident(self.core.in_yul)
+            if next.is_non_reserved_ident(self.flags.in_yul())
                 || next.is_location_specifier()
                 // These aren't valid but we include them for a better error message.
                 || next.is_mutability_specifier()
@@ -350,7 +350,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             path.push(IapKind::Member(self.parse_ident()?));
             while self.eat(TokenKind::Dot) {
                 let id = self.ident_or_err(true)?;
-                if id.name != kw::Address && id.is_reserved(self.core.in_yul) {
+                if id.name != kw::Address && id.is_reserved(self.flags.in_yul()) {
                     self.expected_ident_found_err().emit();
                 }
                 self.bump(); // `id`
@@ -417,7 +417,7 @@ impl<'ast> IndexAccessedPath<'ast> {
                     kind => unreachable!("{kind:?}"),
                 })
                 .take(self.n_idents);
-            let path = PathSlice::from_mut_slice(parser.ctx.arena.alloc_from_iter(path));
+            let path = PathSlice::from_mut_slice(parser.arena.alloc_from_iter(path));
             Type { span: path.span(), kind: TypeKind::Custom(path) }
         };
 

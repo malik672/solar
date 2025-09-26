@@ -19,19 +19,19 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             let then = self.parse_expr()?;
             self.expect(TokenKind::Colon)?;
             let else_ = self.parse_expr()?;
-            let span = expr.span.to(self.core.prev_token.span);
+            let span = expr.span.to(self.prev_token.span);
             Ok(self.alloc(Expr { span, kind: ExprKind::Ternary(expr, then, else_) }))
         } else {
-            let kind = if let Some(binop_eq) = self.core.token.as_binop_eq() {
+            let kind = if let Some(binop_eq) = self.token.as_binop_eq() {
                 Some(binop_eq)
-            } else if self.core.token.kind == TokenKind::Eq {
+            } else if self.token.kind == TokenKind::Eq {
                 None
             } else {
                 return Ok(expr);
             };
             self.bump(); // binop token
             let rhs = self.parse_expr()?;
-            let span = expr.span.to(self.core.prev_token.span);
+            let span = expr.span.to(self.prev_token.span);
             Ok(self.alloc(Expr { span, kind: ExprKind::Assign(expr, kind, rhs) }))
         }
     }
@@ -43,22 +43,22 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         with: Option<Box<'ast, Expr<'ast>>>,
     ) -> PResult<'sess, Box<'ast, Expr<'ast>>> {
         let mut expr = self.parse_unary_expr(with)?;
-        let mut precedence = token_precedence(self.core.token);
+        let mut precedence = token_precedence(self.token);
         while precedence >= min_precedence {
-            while token_precedence(self.core.token) == precedence {
+            while token_precedence(self.token) == precedence {
                 // Parse a**b**c as a**(b**c)
-                let next_precedence = if self.core.token.kind == TokenKind::BinOp(BinOpToken::Star) {
+                let next_precedence = if self.token.kind == TokenKind::BinOp(BinOpToken::Star) {
                     precedence + 1
                 } else {
                     precedence
                 };
 
-                let token = self.core.token;
+                let token = self.token;
                 self.bump(); // binop token
 
                 let rhs = self.parse_binary_expr(next_precedence, None)?;
 
-                let span = expr.span.to(self.core.prev_token.span);
+                let span = expr.span.to(self.prev_token.span);
 
                 let kind = if let Some(binop) = token.as_binop() {
                     ExprKind::Binary(expr, binop, rhs)
@@ -83,15 +83,15 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         with: Option<Box<'ast, Expr<'ast>>>,
     ) -> PResult<'sess, Box<'ast, Expr<'ast>>> {
         if with.is_none() && self.eat(TokenKind::BinOp(BinOpToken::Plus)) {
-            self.dcx().err("unary plus is not supported").span(self.core.prev_token.span).emit();
+            self.dcx().err("unary plus is not supported").span(self.prev_token.span).emit();
         }
 
-        let lo = with.as_ref().map(|e| e.span).unwrap_or(self.core.token.span);
+        let lo = with.as_ref().map(|e| e.span).unwrap_or(self.token.span);
         let parse_lhs = |this: &mut Self, with| {
             this.parse_lhs_expr(with, lo).map(|expr| {
-                if let Some(unop) = this.core.token.as_unop(true) {
+                if let Some(unop) = this.token.as_unop(true) {
                     this.bump(); // unop
-                    let span = lo.to(this.core.prev_token.span);
+                    let span = lo.to(this.prev_token.span);
                     this.alloc(Expr { span, kind: ExprKind::Unary(unop, expr) })
                 } else {
                     expr
@@ -102,13 +102,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             parse_lhs(self, Some(with))
         } else if self.eat_keyword(kw::Delete) {
             self.parse_unary_expr(None).map(|expr| {
-                let span = lo.to(self.core.prev_token.span);
+                let span = lo.to(self.prev_token.span);
                 self.alloc(Expr { span, kind: ExprKind::Delete(expr) })
             })
-        } else if let Some(unop) = self.core.token.as_unop(false) {
+        } else if let Some(unop) = self.token.as_unop(false) {
             self.bump(); // unop
             self.parse_unary_expr(None).map(|expr| {
-                let span = lo.to(self.core.prev_token.span);
+                let span = lo.to(self.prev_token.span);
                 self.alloc(Expr { span, kind: ExprKind::Unary(unop, expr) })
             })
         } else {
@@ -126,12 +126,12 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             Ok(with)
         } else if self.eat_keyword(kw::New) {
             self.parse_type().map(|ty| {
-                let span = lo.to(self.core.prev_token.span);
+                let span = lo.to(self.prev_token.span);
                 self.alloc(Expr { span, kind: ExprKind::New(ty) })
             })
         } else if self.eat_keyword(kw::Payable) {
             self.parse_call_args().map(|args| {
-                let span = lo.to(self.core.prev_token.span);
+                let span = lo.to(self.prev_token.span);
                 self.alloc(Expr { span, kind: ExprKind::Payable(args) })
             })
         } else {
@@ -161,7 +161,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             } else {
                 break;
             };
-            let span = lo.to(self.core.prev_token.span);
+            let span = lo.to(self.prev_token.span);
             expr = self.alloc(Expr { span, kind });
         }
         Ok(expr)
@@ -169,7 +169,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Parses a primary expression.
     fn parse_primary_expr(&mut self) -> PResult<'sess, Box<'ast, Expr<'ast>>> {
-        let lo = self.core.token.span;
+        let lo = self.token.span;
         let kind = if self.check_lit() {
             let (lit, sub) = self.parse_lit(true)?;
             ExprKind::Lit(self.alloc(lit), sub)
@@ -195,13 +195,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             || self.check(TokenKind::OpenDelim(Delimiter::Bracket))
         {
             // Array or tuple expression.
-            let TokenKind::OpenDelim(close_delim) = self.core.token.kind else { unreachable!() };
+            let TokenKind::OpenDelim(close_delim) = self.token.kind else { unreachable!() };
             let is_array = close_delim == Delimiter::Bracket;
             let list = self.parse_optional_items_seq(close_delim, Self::parse_expr)?;
             if is_array {
                 if !list.iter().all(Option::is_some) {
                     let msg = "array expression components cannot be empty";
-                    let span = lo.to(self.core.prev_token.span);
+                    let span = lo.to(self.prev_token.span);
                     return Err(self.dcx().err(msg).span(span));
                 }
                 // SAFETY: All elements are checked to be `Some` above.
@@ -212,7 +212,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         } else {
             return self.unexpected();
         };
-        let span = lo.to(self.core.prev_token.span);
+        let span = lo.to(self.prev_token.span);
         Ok(self.alloc(Expr { span, kind }))
     }
 

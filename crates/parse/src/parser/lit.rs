@@ -34,7 +34,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     }
 
     fn subdenomination(&self) -> Option<SubDenomination> {
-        match self.core.token.ident()?.name {
+        match self.token.ident()?.name {
             kw::Wei => Some(SubDenomination::Ether(EtherSubDenomination::Wei)),
             kw::Gwei => Some(SubDenomination::Ether(EtherSubDenomination::Gwei)),
             kw::Ether => Some(SubDenomination::Ether(EtherSubDenomination::Ether)),
@@ -53,7 +53,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Emits an error if a subdenomination was parsed.
     pub(super) fn expect_no_subdenomination(&mut self) {
         if let Some(_sub) = self.parse_subdenomination() {
-            let span = self.core.prev_token.span;
+            let span = self.prev_token.span;
             self.dcx().err("subdenominations aren't allowed here").span(span).emit();
         }
     }
@@ -62,12 +62,12 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         &mut self,
         with_subdenomination: bool,
     ) -> PResult<'sess, (Symbol, LitKind<'ast>, Option<SubDenomination>)> {
-        let lo = self.core.token.span;
-        if let TokenKind::Ident(symbol @ (kw::True | kw::False)) = self.core.token.kind {
+        let lo = self.token.span;
+        if let TokenKind::Ident(symbol @ (kw::True | kw::False)) = self.token.kind {
             self.bump();
             let mut subdenomination =
                 if with_subdenomination { self.parse_subdenomination() } else { None };
-            self.subdenom_error(&mut subdenomination, lo.to(self.core.prev_token.span));
+            self.subdenom_error(&mut subdenomination, lo.to(self.prev_token.span));
             return Ok((symbol, LitKind::Bool(symbol != kw::False), subdenomination));
         }
 
@@ -75,7 +75,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             return self.unexpected();
         }
 
-        let Some(lit) = self.core.token.lit() else {
+        let Some(lit) = self.token.lit() else {
             unreachable!("check_lit() returned true for non-literal token");
         };
         self.bump();
@@ -85,13 +85,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             TokenLitKind::Integer => self.parse_lit_int(lit.symbol, subdenomination),
             TokenLitKind::Rational => self.parse_lit_rational(lit.symbol, subdenomination),
             TokenLitKind::Str | TokenLitKind::UnicodeStr | TokenLitKind::HexStr => {
-                self.subdenom_error(&mut subdenomination, lo.to(self.core.prev_token.span));
+                self.subdenom_error(&mut subdenomination, lo.to(self.prev_token.span));
                 self.parse_lit_str(lit)
             }
             TokenLitKind::Err(guar) => Ok(LitKind::Err(guar)),
         };
         let kind =
-            result.unwrap_or_else(|e| LitKind::Err(e.span(lo.to(self.core.prev_token.span)).emit()));
+            result.unwrap_or_else(|e| LitKind::Err(e.span(lo.to(self.prev_token.span)).emit()));
         Ok((lit.symbol, kind, subdenomination))
     }
 
@@ -110,7 +110,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         subdenomination: Option<SubDenomination>,
     ) -> PResult<'sess, LitKind<'ast>> {
         use LitError::*;
-        match parse_integer(self.ctx.sess, symbol, subdenomination) {
+        match parse_integer(self.sess, symbol, subdenomination) {
             Ok(l) => Ok(l),
             // User error.
             Err(e @ (IntegerLeadingZeros | IntegerTooLarge)) => Err(self.dcx().err(e.to_string())),
@@ -133,7 +133,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         subdenomination: Option<SubDenomination>,
     ) -> PResult<'sess, LitKind<'ast>> {
         use LitError::*;
-        match parse_rational(self.ctx.sess, symbol, subdenomination) {
+        match parse_rational(self.sess, symbol, subdenomination) {
             Ok(l) => Ok(l),
             // User error.
             Err(
@@ -160,17 +160,17 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             _ => unreachable!(),
         };
 
-        let span = self.core.prev_token.span;
+        let span = self.prev_token.span;
         let (mut value, _) =
-            unescape::parse_string_literal(lit.symbol.as_str(), mode, span, self.ctx.sess);
+            unescape::parse_string_literal(lit.symbol.as_str(), mode, span, self.sess);
         let mut extra = vec![];
-        while let Some(TokenLit { symbol, kind }) = self.core.token.lit() {
+        while let Some(TokenLit { symbol, kind }) = self.token.lit() {
             if kind != lit.kind {
                 break;
             }
-            extra.push((self.core.token.span, symbol));
+            extra.push((self.token.span, symbol));
             let (parsed, _) =
-                unescape::parse_string_literal(symbol.as_str(), mode, self.core.token.span, self.ctx.sess);
+                unescape::parse_string_literal(symbol.as_str(), mode, self.token.span, self.sess);
             value.to_mut().extend_from_slice(&parsed);
             self.bump();
         }
