@@ -21,7 +21,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             };
             self.expect(TokenKind::CloseDelim(Delimiter::Bracket))?;
             ty = Type {
-                span: ty.span.to(self.prev_token.span),
+                span: ty.span.to(self.core.prev_token.span),
                 kind: TypeKind::Array(self.alloc(TypeArray { element: ty, size })),
             };
         }
@@ -102,7 +102,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 } else {
                     "only address types can have state mutability"
                 };
-                self.dcx().err(msg).span(id.span.to(self.prev_token.span)).emit();
+                self.dcx().err(msg).span(id.span.to(self.core.prev_token.span)).emit();
             }
         }
 

@@ -16,7 +16,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     fn parse_items(&mut self, end: TokenKind) -> PResult<'sess, Box<'ast, [Item<'ast>]>> {
         let get_msg_note = |this: &mut Self| {
             let (prefix, list, link);
-            if this.in_contract {
+            if this.core.in_contract {
                 prefix = "contract";
                 list = "function, variable, struct, or modifier definition";
                 link = "contractBodyElement";
@@ -26,7 +26,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 link = "sourceUnit";
             }
             let msg =
-                format!("expected {prefix} item ({list}), found {}", this.token.full_description());
+                format!("expected {prefix} item ({list}), found {}", this.core.token.full_description());
             let note = format!(
                 "for a full list of valid {prefix} items, see <https://docs.soliditylang.org/en/latest/grammar.html#a4.SolidityParser.{link}>"
             );
@@ -35,7 +35,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
         let mut items = Vec::new();
         while let Some(item) = self.parse_item()? {
-            if self.in_contract && !item.is_allowed_in_contract() {
+            if self.core.in_contract && !item.is_allowed_in_contract() {
                 let msg = format!("{}s are not allowed in contracts", item.description());
                 let (_, note) = get_msg_note(self);
                 self.dcx().err(msg).span(item.span).note(note).emit();
@@ -45,7 +45,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         }
         if !self.eat(end) {
             let (msg, note) = get_msg_note(self);
-            return Err(self.dcx().err(msg).span(self.token.span).note(note));
+            return Err(self.dcx().err(msg).span(self.core.token.span).note(note));
         }
         Ok(self.alloc_vec(items))
     }
@@ -84,7 +84,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             self.bump(); // `error`
             self.parse_error().map(ItemKind::Error)
         } else if self.is_variable_declaration() {
-            let flags = if self.in_contract { VarFlags::STATE_VAR } else { VarFlags::CONSTANT_VAR };
+            let flags = if self.core.in_contract { VarFlags::STATE_VAR } else { VarFlags::CONSTANT_VAR };
             self.parse_variable_definition(flags).map(ItemKind::Variable)
         } else {
             return Ok(None);
@@ -94,9 +94,9 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Returns `true` if the current token is the start of a function definition.
     fn is_function_like(&self) -> bool {
-        (self.token.is_keyword(kw::Function)
+        (self.core.token.is_keyword(kw::Function)
             && !self.look_ahead(1).is_open_delim(Delimiter::Parenthesis))
-            || self.token.is_keyword_any(&[
+            || self.core.token.is_keyword_any(&[
                 kw::Constructor,
                 kw::Fallback,
                 kw::Receive,
@@ -106,20 +106,20 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Returns `true` if the current token is the start of a contract definition.
     fn is_contract_like(&self) -> bool {
-        self.token.is_keyword_any(&[kw::Abstract, kw::Contract, kw::Interface, kw::Library])
+        self.core.token.is_keyword_any(&[kw::Abstract, kw::Contract, kw::Interface, kw::Library])
     }
 
     /// Returns `true` if the current token is the start of a variable declaration.
     pub(super) fn is_variable_declaration(&self) -> bool {
         // https://github.com/argotorg/solidity/blob/194b114664c7daebc2ff68af3c573272f5d28913/libsolidity/parsing/Parser.cpp#L2451
-        self.token.is_non_reserved_ident(false) || self.is_non_custom_variable_declaration()
+        self.core.token.is_non_reserved_ident(false) || self.is_non_custom_variable_declaration()
     }
 
     pub(super) fn is_non_custom_variable_declaration(&self) -> bool {
-        self.token.is_keyword(kw::Mapping)
-            || (self.token.is_keyword(kw::Function)
+        self.core.token.is_keyword(kw::Mapping)
+            || (self.core.token.is_keyword(kw::Function)
                 && self.look_ahead(1).is_open_delim(Delimiter::Parenthesis))
-            || self.token.is_elementary_type()
+            || self.core.token.is_elementary_type()
     }
 
     /* ----------------------------------------- Items ----------------------------------------- */
@@ -129,7 +129,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     ///
     /// Expects the current token to be a function-like keyword.
     fn parse_function(&mut self) -> PResult<'sess, ItemFunction<'ast>> {
-        let TokenRepr { span: lo, kind: TokenKind::Ident(kw) } = *self.token else {
+        let TokenRepr { span: lo, kind: TokenKind::Ident(kw) } = *self.core.token else {
             unreachable!("parse_function called without function-like keyword");
         };
         self.bump(); // kw
@@ -152,9 +152,9 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             })
         })?;
 
-        if !self.in_contract && !kind.allowed_in_global() {
+        if !self.core.in_contract && !kind.allowed_in_global() {
             let msg = format!("{kind}s are not allowed in the global scope");
-            self.dcx().err(msg).span(lo.to(self.prev_token.span)).emit();
+            self.dcx().err(msg).span(lo.to(self.core.prev_token.span)).emit();
         }
         // All function kinds are allowed in contracts.
 
@@ -166,7 +166,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         &mut self,
         flags: FunctionFlags,
     ) -> PResult<'sess, FunctionHeader<'ast>> {
-        let lo = self.prev_token.span; // the header span includes the "function" kw
+        let lo = self.core.prev_token.span; // the header span includes the "function" kw
 
         let mut header = FunctionHeader::default();
         let var_flags = if flags.contains(FunctionFlags::PARAM_NAME) {
@@ -179,13 +179,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             // Allow and warn on `function fallback` or `function receive`.
             let ident;
             if flags == FunctionFlags::FUNCTION
-                && self.token.is_keyword_any(&[kw::Fallback, kw::Receive])
+                && self.core.token.is_keyword_any(&[kw::Fallback, kw::Receive])
             {
-                let kw_span = self.prev_token.span;
+                let kw_span = self.core.prev_token.span;
                 ident = self.parse_ident_any()?;
                 let msg = format!("function named `{ident}`");
                 let mut warn = self.dcx().warn(msg).span(ident.span).code(error_code!(3445));
-                if self.in_contract {
+                if self.core.in_contract {
                     let help = format!(
                         "remove the `function` keyword if you intend this to be a contract's {ident} function"
                     );
@@ -196,14 +196,14 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 ident = self.parse_ident()?;
             }
             header.name = Some(ident);
-        } else if self.token.is_non_reserved_ident(false) {
+        } else if self.core.token.is_non_reserved_ident(false) {
             let msg = "function names are not allowed here";
-            self.dcx().err(msg).span(self.token.span).emit();
+            self.dcx().err(msg).span(self.core.token.span).emit();
             self.bump();
         }
 
         if flags.contains(FunctionFlags::NO_PARENS)
-            && !self.token.is_open_delim(Delimiter::Parenthesis)
+            && !self.core.token.is_open_delim(Delimiter::Parenthesis)
         {
             // Omitted parens.
         } else {
@@ -218,7 +218,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             if !(flags == FunctionFlags::FUNCTION_TY && header.visibility.is_some())
                 && let Some(visibility) = self.parse_visibility()
             {
-                let span = self.prev_token.span;
+                let span = self.core.prev_token.span;
                 if let Some(prev) = header.visibility {
                     let msg = "visibility already specified";
                     self.dcx()
@@ -237,7 +237,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                     header.visibility = v.map(|v| Spanned { span, data: v });
                 }
             } else if let Some(state_mutability) = self.parse_state_mutability() {
-                let span = self.prev_token.span;
+                let span = self.core.prev_token.span;
                 if let Some(prev) = header.state_mutability {
                     let msg = "state mutability already specified";
                     self.dcx()
@@ -257,7 +257,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                     header.state_mutability = sm.map(|sm| Spanned { span, data: sm });
                 }
             } else if self.eat_keyword(kw::Virtual) {
-                let span = self.prev_token.span;
+                let span = self.core.prev_token.span;
                 if !flags.contains(FunctionFlags::VIRTUAL) {
                     let msg = "`virtual` is not allowed here";
                     self.dcx().err(msg).span(span).emit();
@@ -284,7 +284,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                     header.override_ = Some(o);
                 }
             } else if flags.contains(FunctionFlags::MODIFIERS)
-                && self.token.is_non_reserved_ident(false)
+                && self.core.token.is_non_reserved_ident(false)
             {
                 modifiers.push(self.parse_modifier()?);
             } else {
@@ -298,7 +298,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             header.returns = Some(self.parse_parameter_list(false, var_flags)?);
         }
 
-        header.span = lo.to(self.prev_token.span);
+        header.span = lo.to(self.core.prev_token.span);
 
         Ok(header)
     }
@@ -336,7 +336,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     ///
     /// Expects the current token to be a contract-like keyword.
     fn parse_contract(&mut self) -> PResult<'sess, ItemContract<'ast>> {
-        let TokenKind::Ident(kw) = self.token.kind else {
+        let TokenKind::Ident(kw) = self.core.token.kind else {
             unreachable!("parse_contract called without contract-like keyword");
         };
         self.bump(); // kw
@@ -423,22 +423,22 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let is_ident_or_strlit = |t: Token| t.is_ident() || t.is_str_lit();
 
         let tokens = if self.check_keyword(sym::solidity)
-            || (self.token.is_ident()
+            || (self.core.token.is_ident()
                 && self.look_ahead_with(1, |t| t.is_op() || t.is_rational_lit()))
         {
             // `pragma <ident> <req>;`
             let ident = self.parse_ident_any()?;
             let req = self.parse_semver_req()?;
             PragmaTokens::Version(ident, req)
-        } else if (is_ident_or_strlit(self.token) && self.look_ahead(1).kind == TokenKind::Semi)
-            || (is_ident_or_strlit(self.token)
+        } else if (is_ident_or_strlit(self.core.token) && self.look_ahead(1).kind == TokenKind::Semi)
+            || (is_ident_or_strlit(self.core.token)
                 && self.look_ahead_with(1, is_ident_or_strlit)
                 && self.look_ahead(2).kind == TokenKind::Semi)
         {
             // `pragma <k>;`
             // `pragma <k> <v>;`
             let k = self.parse_ident_or_strlit()?;
-            let v = if self.token.is_ident() || self.token.is_str_lit() {
+            let v = if self.core.token.is_ident() || self.core.token.is_str_lit() {
                 Some(self.parse_ident_or_strlit()?)
             } else {
                 None
@@ -446,13 +446,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             PragmaTokens::Custom(k, v)
         } else {
             let mut tokens = Vec::new();
-            while !matches!(self.token.kind, TokenKind::Semi | TokenKind::Eof) {
-                tokens.push(self.token);
+            while !matches!(self.core.token.kind, TokenKind::Semi | TokenKind::Eof) {
+                tokens.push(self.core.token);
                 self.bump();
             }
-            if !self.token.is_eof() && tokens.is_empty() {
+            if !self.core.token.is_eof() && tokens.is_empty() {
                 let msg = "expected at least one token in pragma directive";
-                self.dcx().err(msg).span(self.prev_token.span).emit();
+                self.dcx().err(msg).span(self.core.prev_token.span).emit();
             }
             PragmaTokens::Verbatim(self.alloc_vec(tokens))
         };
@@ -476,7 +476,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     pub fn parse_semver_req(&mut self) -> PResult<'sess, SemverReq<'ast>> {
         if self.check_noexpect(TokenKind::Semi) || self.check_noexpect(TokenKind::Eof) {
             let msg = "empty version requirement";
-            let span = self.prev_token.span.to(self.token.span);
+            let span = self.core.prev_token.span.to(self.core.token.span);
             return Err(self.dcx().err(msg).span(span));
         }
         self.parse_semver_req_components_dis().map(|dis| SemverReq { dis })
@@ -520,7 +520,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         // or component component* (conjunction)
 
         let mut components = Vec::new();
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         let (op, v) = self.parse_semver_component()?;
         if self.eat(TokenKind::BinOp(BinOpToken::Minus)) {
             // range
@@ -528,21 +528,21 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             let _ = op;
             let (_second_op, right) = self.parse_semver_component()?;
             let kind = SemverReqComponentKind::Range(v, right);
-            let span = lo.to(self.prev_token.span);
+            let span = lo.to(self.core.prev_token.span);
             components.push(SemverReqComponent { span, kind });
         } else {
             // conjunction; first is already parsed
-            let span = lo.to(self.prev_token.span);
+            let span = lo.to(self.core.prev_token.span);
             let kind = SemverReqComponentKind::Op(op, v);
             components.push(SemverReqComponent { span, kind });
             // others
-            while !matches!(self.token.kind, TokenKind::OrOr | TokenKind::Eof | TokenKind::Semi) {
+            while !matches!(self.core.token.kind, TokenKind::OrOr | TokenKind::Eof | TokenKind::Semi) {
                 let (span, (op, v)) = self.parse_spanned(Self::parse_semver_component)?;
                 let kind = SemverReqComponentKind::Op(op, v);
                 components.push(SemverReqComponent { span, kind });
             }
         }
-        let span = lo.to(self.prev_token.span);
+        let span = lo.to(self.core.prev_token.span);
         let components = self.alloc_vec(components);
         Ok(SemverReqCon { span, components })
     }
@@ -555,7 +555,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     fn parse_semver_op(&mut self) -> Option<SemverOp> {
         // https://github.com/argotorg/solidity/blob/e81f2bdbd66e9c8780f74b8a8d67b4dc2c87945e/liblangutil/SemVerHandler.cpp#L227
-        let op = match self.token.kind {
+        let op = match self.core.token.kind {
             TokenKind::Eq => SemverOp::Exact,
             TokenKind::Gt => SemverOp::Greater,
             TokenKind::Ge => SemverOp::GreaterEq,
@@ -654,10 +654,10 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         use UserDefinableOperator as Op;
         macro_rules! user_op {
             ($($tok1:tt $(($tok2:tt))? => $op:expr),* $(,)?) => {
-                match self.token.kind {
+                match self.core.token.kind {
                     $($tok1 $(($tok2))? => $op,)*
                     _ => {
-                        self.expected_tokens.extend_from_slice(&[$(ExpectedToken::Token($tok1 $(($tok2))?)),*]);
+                        self.ctx.expected_tokens.extend_from_slice(&[$(ExpectedToken::Token($tok1 $(($tok2))?)),*]);
                         return self.unexpected();
                     }
                 }
@@ -702,7 +702,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         flags: VarFlags,
         ty: Option<Type<'ast>>,
     ) -> PResult<'sess, VariableDefinition<'ast>> {
-        let mut lo = self.token.span;
+        let mut lo = self.core.token.span;
         let ty = match ty {
             Some(ty) => {
                 lo = lo.with_lo(ty.span.lo());
@@ -717,10 +717,10 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         {
             let msg = "expected a state variable declaration";
             let note = "this style of fallback function has been removed; use the `fallback` or `receive` keywords instead";
-            self.dcx().err(msg).span(self.token.span).note(note).emit();
+            self.dcx().err(msg).span(self.core.token.span).note(note).emit();
             let _ = self.parse_block()?;
             return Ok(VariableDefinition {
-                span: lo.to(self.prev_token.span),
+                span: lo.to(self.core.prev_token.span),
                 ty,
                 visibility: None,
                 mutability: None,
@@ -741,20 +741,20 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             if let Some(s) = self.parse_data_location() {
                 if !flags.contains(VarFlags::DATALOC) {
                     let msg = "data locations are not allowed here";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else if data_location.is_some() {
                     let msg = "data location already specified";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else {
                     data_location = Some(s);
                 }
             } else if let Some(v) = self.parse_visibility() {
                 if !flags.contains(VarFlags::from_visibility(v)) {
                     let msg = visibility_error(v, flags.visibilities());
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else if visibility.is_some() {
                     let msg = "visibility already specified";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else {
                     visibility = Some(v);
                 }
@@ -762,34 +762,34 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 // `CONSTANT_VAR` is special cased later.
                 if flags != VarFlags::CONSTANT_VAR && !flags.contains(VarFlags::from_varmut(m)) {
                     let msg = varmut_error(m, flags.varmuts());
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else if mutability.is_some() {
                     let msg = "mutability already specified";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else {
                     mutability = Some(m);
                 }
             } else if self.eat_keyword(kw::Indexed) {
                 if !flags.contains(VarFlags::INDEXED) {
                     let msg = "`indexed` is not allowed here";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else if indexed {
                     let msg = "`indexed` already specified";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else {
                     indexed = true;
                 }
             } else if self.eat_keyword(kw::Virtual) {
                 let msg = "`virtual` is not allowed here";
-                self.dcx().err(msg).span(self.prev_token.span).emit();
+                self.dcx().err(msg).span(self.core.prev_token.span).emit();
             } else if self.eat_keyword(kw::Override) {
                 let o = self.parse_override()?;
                 if !flags.contains(VarFlags::OVERRIDE) {
                     let msg = "`override` is not allowed here";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else if override_.is_some() {
                     let msg = "override already specified";
-                    self.dcx().err(msg).span(self.prev_token.span).emit();
+                    self.dcx().err(msg).span(self.core.prev_token.span).emit();
                 } else {
                     override_ = Some(o);
                 }
@@ -821,7 +821,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             self.expect_semi()?;
         }
 
-        let span = lo.to(self.prev_token.span);
+        let span = lo.to(self.core.prev_token.span);
 
         if mutability == Some(VarMut::Constant) && initializer.is_none() {
             let msg = "constant variable must be initialized";
@@ -862,10 +862,10 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         allow_empty: bool,
         flags: VarFlags,
     ) -> PResult<'sess, ParameterList<'ast>> {
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         let vars =
             self.parse_paren_comma_seq(allow_empty, |this| this.parse_variable_definition(flags))?;
-        Ok(ParameterList { vars, span: lo.to(self.prev_token.span) })
+        Ok(ParameterList { vars, span: lo.to(self.core.prev_token.span) })
     }
 
     /// Parses a list of inheritance specifiers.
@@ -882,17 +882,17 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Parses a storage layout specifier.
     fn parse_storage_layout_specifier(&mut self) -> PResult<'sess, StorageLayoutSpecifier<'ast>> {
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         self.expect_keyword(sym::layout)?;
         self.expect_keyword(sym::at)?;
         let slot = self.parse_expr()?;
-        Ok(StorageLayoutSpecifier { span: lo.to(self.prev_token.span), slot })
+        Ok(StorageLayoutSpecifier { span: lo.to(self.core.prev_token.span), slot })
     }
 
     /// Parses a single modifier invocation.
     fn parse_modifier(&mut self) -> PResult<'sess, Modifier<'ast>> {
         let name = self.parse_path()?;
-        let arguments = if self.token.kind == TokenKind::OpenDelim(Delimiter::Parenthesis) {
+        let arguments = if self.core.token.kind == TokenKind::OpenDelim(Delimiter::Parenthesis) {
             self.parse_call_args()?
         } else {
             CallArgs::empty(name.span().shrink_to_hi())
@@ -904,14 +904,14 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     ///
     /// Expects the `override` to have already been eaten.
     fn parse_override(&mut self) -> PResult<'sess, Override<'ast>> {
-        debug_assert!(self.prev_token.is_keyword(kw::Override));
-        let lo = self.prev_token.span;
-        let paths = if self.token.is_open_delim(Delimiter::Parenthesis) {
+        debug_assert!(self.core.prev_token.is_keyword(kw::Override));
+        let lo = self.core.prev_token.span;
+        let paths = if self.core.token.is_open_delim(Delimiter::Parenthesis) {
             self.parse_paren_comma_seq(false, Self::parse_path)?
         } else {
             Default::default()
         };
-        let span = lo.to(self.prev_token.span);
+        let span = lo.to(self.core.prev_token.span);
         Ok(Override { span, paths })
     }
 
@@ -930,7 +930,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         if !self.check_str_lit() {
             return None;
         }
-        let TokenRepr { kind: TokenKind::Literal(TokenLitKind::Str, symbol), span } = *self.token
+        let TokenRepr { kind: TokenKind::Literal(TokenLitKind::Str, symbol), span } = *self.core.token
         else {
             unreachable!()
         };
@@ -1072,7 +1072,7 @@ impl<'p, 'sess, 'ast> SemverVersionParser<'p, 'sess, 'ast> {
     }
 
     fn current_token(&self) -> &Token {
-        &self.p.token
+        &self.p.core.token
     }
 
     fn current_span(&self) -> Span {

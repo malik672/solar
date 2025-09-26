@@ -17,9 +17,9 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let object = if self.check_keyword(sym::object) {
             self.parse_yul_object(docs)
         } else {
-            let lo = self.token.span;
+            let lo = self.core.token.span;
             self.parse_yul_block().map(|code| {
-                let span = lo.to(self.prev_token.span);
+                let span = lo.to(self.core.prev_token.span);
                 let name = StrLit { span, value: sym::object };
                 let code = CodeBlock { span, code };
                 Object { docs, span, name, code, children: Box::default(), data: Box::default() }
@@ -33,7 +33,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     ///
     /// Reference: <https://docs.soliditylang.org/en/latest/yul.html#specification-of-yul-object>
     pub fn parse_yul_object(&mut self, docs: DocComments<'ast>) -> PResult<'sess, Object<'ast>> {
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         self.expect_keyword(sym::object)?;
         let name = self.parse_str_lit()?;
 
@@ -53,7 +53,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         }
         self.expect(TokenKind::CloseDelim(Delimiter::Brace))?;
 
-        let span = lo.to(self.prev_token.span);
+        let span = lo.to(self.core.prev_token.span);
         let children = self.alloc_vec(children);
         let data = self.alloc_vec(data);
         Ok(Object { docs, span, name, code, children, data })
@@ -61,16 +61,16 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Parses a Yul code block.
     fn parse_yul_code(&mut self) -> PResult<'sess, CodeBlock<'ast>> {
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         self.expect_keyword(sym::code)?;
         let code = self.parse_yul_block()?;
-        let span = lo.to(self.prev_token.span);
+        let span = lo.to(self.core.prev_token.span);
         Ok(CodeBlock { span, code })
     }
 
     /// Parses a Yul data segment.
     fn parse_yul_data(&mut self) -> PResult<'sess, Data<'ast>> {
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         self.expect_keyword(sym::data)?;
         let name = self.parse_str_lit()?;
         let data = self.parse_yul_lit()?;
@@ -78,7 +78,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             let msg = "only string and hex string literals are allowed in `data` segments";
             return Err(self.dcx().err(msg).span(data.span));
         }
-        let span = lo.to(self.prev_token.span);
+        let span = lo.to(self.core.prev_token.span);
         Ok(Data { span, name, data })
     }
 
@@ -112,10 +112,10 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Parses a Yul block, without setting `in_yul`.
     pub fn parse_yul_block_unchecked(&mut self) -> PResult<'sess, Block<'ast>> {
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         self.parse_delim_seq(Delimiter::Brace, SeqSep::none(), true, Self::parse_yul_stmt_unchecked)
             .map(|stmts| {
-                let span = lo.to(self.prev_token.span);
+                let span = lo.to(self.core.prev_token.span);
                 Block { span, stmts }
             })
     }
@@ -141,7 +141,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         } else if self.eat_keyword(kw::Leave) {
             Ok(StmtKind::Leave)
         } else if self.check_ident() {
-            let lo = self.token.span;
+            let lo = self.core.token.span;
             let path = self.parse_path_any()?;
             if self.check(TokenKind::OpenDelim(Delimiter::Parenthesis)) {
                 let name = self.expect_single_ident_path(path);
@@ -215,7 +215,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     /// Parses a Yul switch statement.
     fn parse_yul_stmt_switch(&mut self) -> PResult<'sess, StmtSwitch<'ast>> {
-        let lo = self.prev_token.span;
+        let lo = self.core.prev_token.span;
         let selector = self.parse_yul_expr()?;
         let mut cases = Vec::new();
         while self.check_keyword(kw::Case) {
@@ -227,7 +227,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             None
         };
         if cases.is_empty() {
-            let span = lo.to(self.prev_token.span);
+            let span = lo.to(self.core.prev_token.span);
             if default_case.is_none() {
                 self.dcx().err("`switch` statement has no cases").span(span).emit();
             } else {
@@ -247,7 +247,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     fn parse_yul_stmt_switch_case(&mut self, kw: Symbol) -> PResult<'sess, StmtSwitchCase<'ast>> {
         self.parse_spanned(|this| {
-            debug_assert!(this.token.is_keyword(kw));
+            debug_assert!(this.core.token.is_keyword(kw));
             this.bump();
             let constant = if kw == kw::Case {
                 let lit = this.parse_yul_lit()?;
@@ -283,7 +283,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             self.parse_yul_lit().map(|lit| ExprKind::Lit(self.alloc(lit)))
         } else if self.check_path() {
             let path = self.parse_path_any()?;
-            if self.token.is_open_delim(Delimiter::Parenthesis) {
+            if self.core.token.is_open_delim(Delimiter::Parenthesis) {
                 // Paths are not allowed in call expressions, but Solc parses them anyway.
                 let ident = self.expect_single_ident_path(path);
                 self.parse_yul_expr_call_with(ident).map(ExprKind::Call)

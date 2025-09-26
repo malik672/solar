@@ -31,35 +31,41 @@ const PARSER_RECURSION_LIMIT: usize = 128;
 /// # fn main() {}
 #[doc = include_str!("../../doc-examples/parser.rs")]
 /// ```
-pub struct Parser<'sess, 'ast> {
-    /// The parser session.
-    pub sess: &'sess Session,
-    /// The arena where the AST nodes are allocated.
-    pub arena: &'ast ast::Arena,
-
+// Hot fields - frequently accessed in tight parsing loops
+pub struct ParserCore {
     /// The current token.
     pub token: Token,
     /// The previous token.
     pub prev_token: Token,
-    /// List of expected tokens. Cleared after each `bump` call.
-    expected_tokens: Vec<ExpectedToken>,
-    /// The span of the last unexpected token.
-    last_unexpected_token_span: Option<Span>,
-    /// The current doc-comments.
-    docs: Vec<DocComment>,
-
     /// The token stream.
     tokens: std::vec::IntoIter<Token>,
-
     /// Whether the parser is in Yul mode.
     ///
     /// Currently, this can only happen when parsing a Yul "assembly" block.
     in_yul: bool,
     /// Whether the parser is currently parsing a contract block.
     in_contract: bool,
-
     /// Current recursion depth for recursive parsing operations.
     recursion_depth: usize,
+}
+
+// Cold fields - accessed less frequently
+pub struct ParserContext<'sess, 'ast> {
+    /// The parser session.
+    pub sess: &'sess Session,
+    /// The arena where the AST nodes are allocated.
+    pub arena: &'ast ast::Arena,
+    /// List of expected tokens. Cleared after each `bump` call.
+    expected_tokens: Vec<ExpectedToken>,
+    /// The span of the last unexpected token.
+    last_unexpected_token_span: Option<Span>,
+    /// The current doc-comments.
+    docs: Vec<DocComment>,
+}
+
+pub struct Parser<'sess, 'ast> {
+    core: ParserCore,
+    ctx: ParserContext<'sess, 'ast>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,17 +148,21 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     pub fn new(sess: &'sess Session, arena: &'ast ast::Arena, tokens: Vec<Token>) -> Self {
         assert!(sess.is_entered(), "session should be entered before parsing");
         let mut parser = Self {
-            sess,
-            arena,
-            token: Token::DUMMY,
-            prev_token: Token::DUMMY,
-            expected_tokens: Vec::with_capacity(8),
-            last_unexpected_token_span: None,
-            docs: Vec::with_capacity(4),
-            tokens: tokens.into_iter(),
-            in_yul: false,
-            in_contract: false,
-            recursion_depth: 0,
+            core: ParserCore {
+                token: Token::DUMMY,
+                prev_token: Token::DUMMY,
+                tokens: tokens.into_iter(),
+                in_yul: false,
+                in_contract: false,
+                recursion_depth: 0,
+            },
+            ctx: ParserContext {
+                sess,
+                arena,
+                expected_tokens: Vec::with_capacity(8),
+                last_unexpected_token_span: None,
+                docs: Vec::with_capacity(4),
+            },
         };
         parser.bump();
         parser
@@ -214,12 +224,12 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Returns the diagnostic context.
     #[inline]
     pub fn dcx(&self) -> &'sess DiagCtxt {
-        &self.sess.dcx
+&self.ctx.sess.dcx
     }
 
     /// Allocates an object on the AST arena.
     pub fn alloc<T>(&self, value: T) -> Box<'ast, T> {
-        self.arena.alloc(value)
+        self.ctx.arena.alloc(value)
     }
 
     /// Allocates a list of objects on the AST arena.
@@ -228,17 +238,17 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     ///
     /// Panics if the list is empty.
     pub fn alloc_path(&self, values: &[Ident]) -> AstPath<'ast> {
-        PathSlice::from_mut_slice(self.arena.alloc_slice_copy(values))
+        PathSlice::from_mut_slice(self.ctx.arena.alloc_slice_copy(values))
     }
 
     /// Allocates a list of objects on the AST arena.
     pub fn alloc_vec<T>(&self, values: Vec<T>) -> Box<'ast, [T]> {
-        self.arena.alloc_vec(values)
+        self.ctx.arena.alloc_vec(values)
     }
 
     /// Allocates a list of objects on the AST arena.
     pub fn alloc_smallvec<A: smallvec::Array>(&self, values: SmallVec<A>) -> Box<'ast, [A::Item]> {
-        self.arena.alloc_smallvec(values)
+        self.ctx.arena.alloc_smallvec(values)
     }
 
     /// Returns an "unexpected token" error in a [`PResult`] for the current token.
@@ -279,10 +289,10 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         edible: &[TokenKind],
         inedible: &[TokenKind],
     ) -> PResult<'sess, Recovered> {
-        if edible.contains(&self.token.kind) {
+        if edible.contains(&self.core.token.kind) {
             self.bump();
             Ok(Recovered::No)
-        } else if inedible.contains(&self.token.kind) {
+        } else if inedible.contains(&self.core.token.kind) {
             // leave it in the input
             Ok(Recovered::No)
         } else {
@@ -297,8 +307,8 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         edible: &[TokenKind],
         inedible: &[TokenKind],
     ) -> PResult<'sess, Recovered> {
-        if self.token.kind != TokenKind::Eof
-            && self.last_unexpected_token_span == Some(self.token.span)
+        if self.core.token.kind != TokenKind::Eof
+            && self.ctx.last_unexpected_token_span == Some(self.core.token.span)
         {
             panic!("called unexpected twice on the same token");
         }
@@ -308,7 +318,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             .chain(inedible)
             .cloned()
             .map(ExpectedToken::Token)
-            .chain(self.expected_tokens.iter().cloned())
+            .chain(self.ctx.expected_tokens.iter().cloned())
             .filter(|token| {
                 // Filter out suggestions that suggest the same token
                 // which was found and deemed incorrect.
@@ -321,8 +331,8 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                     false
                 }
 
-                if !token.eq_kind(self.token.kind) {
-                    let eq = is_ident_eq_keyword(self.token.kind, token);
+                if !token.eq_kind(self.core.token.kind) {
+                    let eq = is_ident_eq_keyword(self.core.token.kind, token);
                     // If the suggestion is a keyword and the found token is an ident,
                     // the content of which are equal to the suggestion's content,
                     // we can remove that suggestion (see the `return false` below).
@@ -331,7 +341,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                     // content of which is the same as the found token's, we remove it as well.
                     if !eq {
                         if let ExpectedToken::Token(kind) = token
-                            && *kind == self.token.kind
+                            && *kind == self.core.token.kind
                         {
                             return false;
                         }
@@ -345,43 +355,43 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         expected.dedup();
 
         let expect = ExpectedToken::to_string_many(&expected);
-        let actual = self.token.full_description();
+        let actual = self.core.token.full_description();
         let (msg_exp, (mut label_span, label_exp)) = match expected.len() {
             0 => (
                 format!("unexpected token: {actual}"),
-                (self.prev_token.span, "unexpected token after this".to_string()),
+                (self.core.prev_token.span, "unexpected token after this".to_string()),
             ),
             1 => (
                 format!("expected {expect}, found {actual}"),
-                (self.prev_token.span.shrink_to_hi(), format!("expected {expect}")),
+                (self.core.prev_token.span.shrink_to_hi(), format!("expected {expect}")),
             ),
             len => {
                 let fmt = format!("expected one of {expect}, found {actual}");
                 let short_expect = if len > 6 { format!("{len} possible tokens") } else { expect };
-                let s = self.prev_token.span.shrink_to_hi();
+                let s = self.core.prev_token.span.shrink_to_hi();
                 (fmt, (s, format!("expected one of {short_expect}")))
             }
         };
-        if self.token.is_eof() {
+        if self.core.token.is_eof() {
             // This is EOF; don't want to point at the following char, but rather the last token.
-            label_span = self.prev_token.span;
+            label_span = self.core.prev_token.span;
         };
 
-        self.last_unexpected_token_span = Some(self.token.span);
-        let mut err = self.dcx().err(msg_exp).span(self.token.span);
+        self.ctx.last_unexpected_token_span = Some(self.core.token.span);
+        let mut err = self.dcx().err(msg_exp).span(self.core.token.span);
 
-        if self.prev_token.span.is_dummy()
+        if self.core.prev_token.span.is_dummy()
             || !self
-                .sess
+                .ctx.sess
                 .source_map()
-                .is_multiline(self.token.span.shrink_to_hi().until(label_span.shrink_to_lo()))
+                .is_multiline(self.core.token.span.shrink_to_hi().until(label_span.shrink_to_lo()))
         {
             // When the spans are in the same line, it means that the only content between
             // them is whitespace, point at the found token in that case.
-            err = err.span_label(self.token.span, label_exp);
+            err = err.span_label(self.core.token.span, label_exp);
         } else {
             err = err.span_label(label_span, label_exp);
-            err = err.span_label(self.token.span, "unexpected token");
+            err = err.span_label(self.core.token.span, "unexpected token");
         }
 
         Err(err)
@@ -411,7 +421,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     #[inline]
     #[must_use]
     fn check_noexpect(&self, tok: TokenKind) -> bool {
-        self.token.kind == tok
+        self.core.token.kind == tok
     }
 
     /// Consumes a token 'tok' if it exists. Returns whether the given token was present.
@@ -444,7 +454,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     #[inline]
     #[must_use]
     fn check_keyword(&mut self, kw: Symbol) -> bool {
-        let is_keyword = self.token.is_keyword(kw);
+        let is_keyword = self.core.token.is_keyword(kw);
         if !is_keyword {
             self.push_expected(ExpectedToken::Keyword(kw));
         }
@@ -473,32 +483,32 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     #[must_use]
     fn check_ident(&mut self) -> bool {
-        self.check_or_expected(self.token.is_ident(), ExpectedToken::Ident)
+        self.check_or_expected(self.core.token.is_ident(), ExpectedToken::Ident)
     }
 
     #[must_use]
     fn check_nr_ident(&mut self) -> bool {
-        self.check_or_expected(self.token.is_non_reserved_ident(self.in_yul), ExpectedToken::Ident)
+        self.check_or_expected(self.core.token.is_non_reserved_ident(self.core.in_yul), ExpectedToken::Ident)
     }
 
     #[must_use]
     fn check_path(&mut self) -> bool {
-        self.check_or_expected(self.token.is_ident(), ExpectedToken::Path)
+        self.check_or_expected(self.core.token.is_ident(), ExpectedToken::Path)
     }
 
     #[must_use]
     fn check_lit(&mut self) -> bool {
-        self.check_or_expected(self.token.is_lit(), ExpectedToken::Lit)
+        self.check_or_expected(self.core.token.is_lit(), ExpectedToken::Lit)
     }
 
     #[must_use]
     fn check_str_lit(&mut self) -> bool {
-        self.check_or_expected(self.token.is_str_lit(), ExpectedToken::StrLit)
+        self.check_or_expected(self.core.token.is_str_lit(), ExpectedToken::StrLit)
     }
 
     #[must_use]
     fn check_elementary_type(&mut self) -> bool {
-        self.check_or_expected(self.token.is_elementary_type(), ExpectedToken::ElementaryType)
+        self.check_or_expected(self.core.token.is_elementary_type(), ExpectedToken::ElementaryType)
     }
 
     #[must_use]
@@ -511,7 +521,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
 
     // #[inline(never)]
     fn push_expected(&mut self, expected: ExpectedToken) {
-        self.expected_tokens.push(expected);
+        self.ctx.expected_tokens.push(expected);
     }
 
     /// Parses a comma-separated sequence delimited by parentheses (e.g. `(x, y)`).
@@ -648,15 +658,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let mut trailing = false;
         let mut v = SmallVec::<[T; 8]>::new();
 
-
-       
         if !allow_empty {
             v.push(f(self)?);
             first = false;
         }
 
         while !self.check(ket) {
-            if let TokenKind::CloseDelim(..) | TokenKind::Eof = self.token.kind {
+            if let TokenKind::CloseDelim(..) | TokenKind::Eof = self.core.token.kind {
                 break;
             }
 
@@ -697,15 +705,11 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             }
             if !sep.trailing_sep_allowed && trailing {
                 let msg = format!("trailing `{sep_kind}` separator is not allowed");
-                self.dcx().err(msg).span(self.prev_token.span).emit();
+                self.dcx().err(msg).span(self.core.prev_token.span).emit();
             }
         }
-       let d = std::mem::size_of::<Self>();
         let x = self.alloc_smallvec(v);
- println!("Size of Parser struct: {:?} bytes", d);
         Ok((x, recovered))
-
-      
     }
 
     /// Advance the parser by one token.
@@ -733,29 +737,29 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         if next.is_comment_or_doc() {
             self.dcx().bug("`bump_with` should not be used with comments").span(next.span).emit();
         }
-        self.prev_token = std::mem::replace(&mut self.token, next);
-        self.expected_tokens.clear();
-        self.docs.clear();
+        self.core.prev_token = std::mem::replace(&mut self.core.token, next);
+        self.ctx.expected_tokens.clear();
+        self.ctx.docs.clear();
     }
 
     /// Bumps comments and docs.
     ///
-    /// Pushes docs to `self.docs`. Retrieve them with `parse_doc_comments`.
+    /// Pushes docs to `self.ctx.docs`. Retrieve them with `parse_doc_comments`.
     #[cold]
     fn bump_trivia(&mut self, next: Token) {
-        self.docs.clear();
+        self.ctx.docs.clear();
 
         debug_assert!(next.is_comment_or_doc());
-        self.prev_token = std::mem::replace(&mut self.token, next);
-        while let Some((is_doc, doc)) = self.token.comment() {
+        self.core.prev_token = std::mem::replace(&mut self.core.token, next);
+        while let Some((is_doc, doc)) = self.core.token.comment() {
             if is_doc {
-                self.docs.push(doc);
+                self.ctx.docs.push(doc);
             }
             // Don't set `prev_token` on purpose.
-            self.token = self.next_token();
+            self.core.token = self.next_token();
         }
 
-        self.expected_tokens.clear();
+        self.ctx.expected_tokens.clear();
     }
 
     /// Advances the internal `tokens` iterator, without updating the parser state.
@@ -763,7 +767,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Use [`bump`](Self::bump) and [`token`](Self::token) instead.
     #[inline(always)]
     fn next_token(&mut self) -> Token {
-        self.tokens.next().unwrap_or(Token::new(TokenKind::Eof, self.token.span))
+        self.core.tokens.next().unwrap_or(Token::new(TokenKind::Eof, self.core.token.span))
     }
 
     /// Returns the token `dist` tokens ahead of the current one.
@@ -774,7 +778,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     pub fn look_ahead(&self, dist: usize) -> Token {
         // Specialize for the common `dist` cases.
         match dist {
-            0 => self.token,
+            0 => self.core.token,
             1 => self.look_ahead_full(1),
             2 => self.look_ahead_full(2),
             dist => self.look_ahead_full(dist),
@@ -782,7 +786,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     }
 
     fn look_ahead_full(&self, dist: usize) -> Token {
-        self.tokens
+        self.core.tokens
             .as_slice()
             .iter()
             .copied()
@@ -802,18 +806,18 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Runs `f` with the parser in a contract context.
     #[inline]
     fn in_contract<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let old = std::mem::replace(&mut self.in_contract, true);
+        let old = std::mem::replace(&mut self.core.in_contract, true);
         let res = f(self);
-        self.in_contract = old;
+        self.core.in_contract = old;
         res
     }
 
     /// Runs `f` with the parser in a Yul context.
     #[inline]
     fn in_yul<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
-        let old = std::mem::replace(&mut self.in_yul, true);
+        let old = std::mem::replace(&mut self.core.in_yul, true);
         let res = f(self);
-        self.in_yul = old;
+        self.core.in_yul = old;
         res
     }
 
@@ -824,21 +828,21 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         context: &str,
         f: impl FnOnce(&mut Self) -> PResult<'sess, T>,
     ) -> PResult<'sess, T> {
-        self.recursion_depth += 1;
-        let res = if self.recursion_depth > PARSER_RECURSION_LIMIT {
+        self.core.recursion_depth += 1;
+        let res = if self.core.recursion_depth > PARSER_RECURSION_LIMIT {
             Err(self.recursion_limit_reached(context))
         } else {
             f(self)
         };
-        self.recursion_depth -= 1;
+        self.core.recursion_depth -= 1;
         res
     }
 
     #[cold]
     fn recursion_limit_reached(&mut self, context: &str) -> PErr<'sess> {
-        let mut err = self.dcx().err("recursion limit reached").span(self.token.span);
-        if !self.prev_token.span.is_dummy() {
-            err = err.span_label(self.prev_token.span, format!("while parsing {context}"));
+        let mut err = self.dcx().err("recursion limit reached").span(self.core.token.span);
+        if !self.core.prev_token.span.is_dummy() {
+            err = err.span_label(self.core.prev_token.span, format!("while parsing {context}"));
         }
         err
     }
@@ -852,9 +856,9 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         &mut self,
         f: impl FnOnce(&mut Self) -> PResult<'sess, T>,
     ) -> PResult<'sess, (Span, T)> {
-        let lo = self.token.span;
+        let lo = self.core.token.span;
         let res = f(self);
-        let span = lo.to(self.prev_token.span);
+        let span = lo.to(self.core.prev_token.span);
         match res {
             Ok(t) => Ok((span, t)),
             Err(e) if e.span.is_dummy() => Err(e.span(span)),
@@ -865,13 +869,13 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Parses contiguous doc comments. Can be empty.
     #[inline]
     pub fn parse_doc_comments(&mut self) -> DocComments<'ast> {
-        if !self.docs.is_empty() { self.parse_doc_comments_inner() } else { Default::default() }
+        if !self.ctx.docs.is_empty() { self.parse_doc_comments_inner() } else { Default::default() }
     }
 
     #[cold]
     fn parse_doc_comments_inner(&mut self) -> DocComments<'ast> {
-        let docs = self.arena.alloc_slice_copy(&self.docs);
-        self.docs.clear();
+        let docs = self.ctx.arena.alloc_slice_copy(&self.ctx.docs);
+        self.ctx.docs.clear();
         docs.into()
     }
 
@@ -885,7 +889,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Parses a qualified identifier starting with the given identifier.
     #[track_caller]
     pub fn parse_path_with(&mut self, first: Ident) -> PResult<'sess, AstPath<'ast>> {
-        if self.in_yul {
+        if self.core.in_yul {
             self.parse_path_with_f(first, Self::parse_yul_path_ident)
         } else {
             self.parse_path_with_f(first, Self::parse_ident)
@@ -951,7 +955,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     #[track_caller]
     fn parse_ident_common(&mut self, recover: bool) -> PResult<'sess, Ident> {
         let ident = self.ident_or_err(recover)?;
-        if ident.is_reserved(self.in_yul) {
+        if ident.is_reserved(self.core.in_yul) {
             let err = self.expected_ident_found_err();
             if recover {
                 err.emit();
@@ -966,7 +970,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     /// Returns Ok if the current token is an identifier. Does not advance the parser.
     #[track_caller]
     fn ident_or_err(&mut self, recover: bool) -> PResult<'sess, Ident> {
-        match self.token.ident() {
+        match self.core.token.ident() {
             Some(ident) => Ok(ident),
             None => self.expected_ident_found(recover),
         }
@@ -975,7 +979,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
     #[cold]
     #[track_caller]
     fn expected_ident_found(&mut self, recover: bool) -> PResult<'sess, Ident> {
-        self.expected_ident_found_other(self.token, recover)
+        self.expected_ident_found_other(self.core.token, recover)
     }
 
     #[cold]
