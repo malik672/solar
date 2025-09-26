@@ -644,7 +644,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         mut f: impl FnMut(&mut Self) -> PResult<'sess, T>,
     ) -> PResult<'sess, (Box<'ast, [T]>, Recovered)> {
         let mut first = true;
-        let mut recovered = Recovered::No;
+        let mut recovered = Recovered::No;  
         let mut trailing = false;
         let mut v = SmallVec::<[T; 8]>::new();
 
@@ -699,7 +699,8 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             }
         }
 
-        Ok((self.alloc_smallvec(v), recovered))
+        let x = self.alloc_smallvec(v);
+        Ok((x, recovered))
     }
 
     /// Advance the parser by one token.
