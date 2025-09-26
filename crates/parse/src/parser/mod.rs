@@ -648,8 +648,11 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let mut trailing = false;
         let mut v = SmallVec::<[T; 8]>::new();
 
+        let mut a = 0;
+
         if !allow_empty {
             v.push(f(self)?);
+            a += 1;
             first = false;
         }
 
@@ -681,6 +684,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 }
             }
 
+            a += 1;
             v.push(f(self)?);
         }
 
@@ -700,7 +704,11 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         }
 
         let x = self.alloc_smallvec(v);
+          println!("Parsed {a} items");
+ 
         Ok((x, recovered))
+
+      
     }
 
     /// Advance the parser by one token.
