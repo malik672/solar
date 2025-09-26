@@ -648,7 +648,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         let mut trailing = false;
         let mut v = SmallVec::<[T; 8]>::new();
 
-       let d = std::mem::size_of::<Self>();
+
        
         if !allow_empty {
             v.push(f(self)?);
@@ -700,7 +700,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 self.dcx().err(msg).span(self.prev_token.span).emit();
             }
         }
-
+       let d = std::mem::size_of::<Self>();
         let x = self.alloc_smallvec(v);
  println!("Size of Parser struct: {:?} bytes", d);
         Ok((x, recovered))
