@@ -683,7 +683,6 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 }
             }
 
-            a += 1;
             v.push(f(self)?);
         }
 
