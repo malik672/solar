@@ -644,15 +644,14 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
         mut f: impl FnMut(&mut Self) -> PResult<'sess, T>,
     ) -> PResult<'sess, (Box<'ast, [T]>, Recovered)> {
         let mut first = true;
-        let mut recovered = Recovered::No;  
+        let mut recovered = Recovered::No;
         let mut trailing = false;
         let mut v = SmallVec::<[T; 8]>::new();
 
-        let mut a = 0;
-
+       let d = std::mem::size_of::<Self>();
+       println!("Size of Parser struct: {:?} bytes", d);
         if !allow_empty {
             v.push(f(self)?);
-            a += 1;
             first = false;
         }
 
