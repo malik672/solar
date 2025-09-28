@@ -101,32 +101,102 @@ impl ExpectedToken {
 }
 
 /// A sequence separator.
-#[derive(Debug)]
+/// Ultra-compact bit-packed representation:
+/// 7 6 5 4 3 2 1 0
+//│ │ └─────────┘
+//│ │     └─ Token ID (0=None, 1-60=tokens)
+//│ └─ trailing_allowed flag
+//└─ trailing_required flag
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SeqSep {
-    /// The separator token.
-    sep: Option<TokenKind>,
-    /// `true` if a trailing separator is allowed.
-    trailing_sep_allowed: bool,
-    /// `true` if a trailing separator is required.
-    trailing_sep_required: bool,
+    /// Bit-packed data: [required|allowed|token_id(6)]
+    data: u8,
 }
 
 impl SeqSep {
-    fn trailing_enforced(t: TokenKind) -> Self {
-        Self { sep: Some(t), trailing_sep_required: true, trailing_sep_allowed: true }
+    /// Encode TokenKind to simple token ID using match
+    #[inline]
+    const fn encode_token(t: TokenKind) -> u8 {
+        match t {
+            TokenKind::Comma => 1,
+            TokenKind::Semi => 2,
+            _ => 3, // Default for any other token
+        }
+    }
+
+    /// Decode token ID back to TokenKind using match
+    #[inline]
+    const fn decode_token(id: u8) -> TokenKind {
+        //invalid goes to Comma right ? so if we assume 1 is an invalid we can reduce the branches and still solve for 1
+        match id {
+            // 1 => TokenKind::Comma,
+            2 => TokenKind::Semi,
+            _ => TokenKind::Comma, // Default fallback
+        }
+    }
+
+    const fn trailing_enforced(t: TokenKind) -> Self {
+        let token_id = Self::encode_token(t);
+        let data = token_id | (1 << 6) | (1 << 7); // allowed=1, required=1
+        Self { data }
     }
 
     #[allow(dead_code)]
-    fn trailing_allowed(t: TokenKind) -> Self {
-        Self { sep: Some(t), trailing_sep_required: false, trailing_sep_allowed: true }
+    const fn trailing_allowed(t: TokenKind) -> Self {
+        let token_id = Self::encode_token(t);
+        let data = token_id | (1 << 6); // allowed=1, required=0
+        Self { data }
     }
 
-    fn trailing_disallowed(t: TokenKind) -> Self {
-        Self { sep: Some(t), trailing_sep_required: false, trailing_sep_allowed: false }
+    const fn trailing_disallowed(t: TokenKind) -> Self {
+        let token_id = Self::encode_token(t);
+        Self { data: token_id } // allowed=0, required=0
     }
 
-    fn none() -> Self {
-        Self { sep: None, trailing_sep_required: false, trailing_sep_allowed: false }
+    const fn none() -> Self {
+        Self { data: 0 } // token_id=0 (None), flags=0
+    }
+
+    /// Get the separator token (None if token_id=0)
+    #[inline]
+    const fn sep(self) -> Option<TokenKind> {
+        let token_id = self.data & 0b00111111; // Extract bits 0-5
+        if token_id == 0 { None } else { Some(Self::decode_token(token_id)) }
+    }
+
+    /// Check if trailing separator is allowed
+    #[inline]
+    const fn trailing_sep_allowed(self) -> bool {
+        (self.data & (1 << 6)) != 0 // Check bit 6
+    }
+
+    /// Check if trailing separator is required
+    #[inline]
+    const fn trailing_sep_required(self) -> bool {
+        (self.data & (1 << 7)) != 0 // Check bit 7
+    }
+}
+
+#[cfg(test)]
+mod token_size_tests {
+    use super::*;
+    use std::mem;
+
+    #[test]
+    fn test_token_kind_size() {
+        println!("=== Actual TokenKind Size Test ===");
+        println!("TokenKind: {} bytes", mem::size_of::<TokenKind>());
+        println!("Symbol: {} bytes", mem::size_of::<Symbol>());
+        println!("Delimiter: {} bytes", mem::size_of::<Delimiter>());
+
+        // Test specific TokenKind variants
+        let comma = TokenKind::Comma;
+        let ident = TokenKind::Ident(Symbol::DUMMY);
+
+        println!("TokenKind variants are: {} bytes", mem::size_of_val(&comma));
+        assert_eq!(mem::size_of_val(&comma), mem::size_of_val(&ident));
+
+        println!("✅ TokenKind size confirmed");
     }
 }
 
@@ -658,7 +728,7 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
                 break;
             }
 
-            if let Some(sep_kind) = sep.sep {
+            if let Some(sep_kind) = sep.sep() {
                 if first {
                     // no separator for the first element
                     first = false;
@@ -684,16 +754,16 @@ impl<'sess, 'ast> Parser<'sess, 'ast> {
             v.push(f(self)?);
         }
 
-        if let Some(sep_kind) = sep.sep {
+        if let Some(sep_kind) = sep.sep() {
             let open_close_delim = first && allow_empty;
             if !open_close_delim
-                && sep.trailing_sep_required
+                && sep.trailing_sep_required()
                 && !trailing
                 && let Err(e) = self.expect(sep_kind)
             {
                 e.emit();
             }
-            if !sep.trailing_sep_allowed && trailing {
+            if !sep.trailing_sep_allowed() && trailing {
                 let msg = format!("trailing `{sep_kind}` separator is not allowed");
                 self.dcx().err(msg).span(self.prev_token.span).emit();
             }
