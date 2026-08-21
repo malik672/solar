@@ -24,6 +24,13 @@
 //! aggregate corpus output improves. Keeping the pass separate from physical scheduling makes that
 //! tradeoff measurable and leaves room for a later cost-aware selector.
 //!
+//! The pressure oracle exhaustively schedules barrier-delimited regions of at most 16 instructions.
+//! It compares this heuristic with the exact lexicographic minimum of peak semantic liveness and
+//! live-range area, including the region's real live-in and live-out obligations. By default the
+//! oracle is analysis-only and runs only when its tracing target is enabled. The unstable
+//! `-Zevm-min-pressure-schedule` option emits an exact order only when it strictly reduces peak
+//! pressure, falling back to the heuristic for equal-peak and out-of-bound regions.
+//!
 //! The dependency-first shape is adapted from [Vyper Venom's DFT pass]. Venom makes shared values
 //! movable with a preceding single-use expansion pass; this implementation instead pins shared
 //! producers so the late transform does not clone shared expressions or inflate MIR.
@@ -46,6 +53,12 @@ use solar_data_structures::{
 };
 use solar_sema::Gcx;
 
+mod pressure_oracle;
+use pressure_oracle::PressureOracle;
+pub(crate) use pressure_oracle::{
+    PhysicalScheduleCandidate, bounded_physical_schedule_candidates, physical_schedule_candidates,
+};
+
 /// Orders movable MIR instructions for the EVM stack scheduler.
 pub(crate) struct EvmInstSchedule;
 
@@ -54,17 +67,19 @@ impl MirPass for EvmInstSchedule {
         "evm-inst-schedule"
     }
 
-    fn run_pass(&self, _gcx: Gcx<'_>, module: &mut Module, analyses: &mut ModuleAnalyses) -> bool {
-        run_function_pass(module, analyses, |func, _| Self::run_on_function(func))
+    fn run_pass(&self, gcx: Gcx<'_>, module: &mut Module, analyses: &mut ModuleAnalyses) -> bool {
+        let exact = gcx.sess.opts.unstable.evm_min_pressure_schedule;
+        run_function_pass(module, analyses, |func, _| Self::run_on_function(func, exact))
     }
 }
 
 impl EvmInstSchedule {
-    fn run_on_function(func: &mut Function) -> bool {
+    fn run_on_function(func: &mut Function, exact: bool) -> bool {
         let mut changed = false;
         let block_ids = func.blocks.indices().collect::<Vec<_>>();
         let shared_results = Self::shared_results(func);
         let mut scratch = ScheduleScratch::new(func.num_insts());
+        let mut pressure_oracle = PressureOracle::new_if_enabled(func, exact);
 
         for block_id in block_ids {
             let original = std::mem::take(&mut func.blocks[block_id].instructions);
@@ -108,6 +123,13 @@ impl EvmInstSchedule {
                 &mut ordered,
             );
 
+            if let Some(oracle) = &mut pressure_oracle
+                && let Some(exact_order) =
+                    oracle.schedule_block(func, block_id, &original, &ordered, Self::is_movable)
+            {
+                ordered = exact_order;
+            }
+
             if ordered != original {
                 func.blocks[block_id].instructions = ordered;
                 changed = true;
@@ -116,13 +138,17 @@ impl EvmInstSchedule {
             }
         }
 
+        if let Some(oracle) = pressure_oracle {
+            oracle.report(func);
+        }
+
         changed
     }
 }
 
 impl EvmInstSchedule {
     /// Whether an instruction may move among other read-only instructions in the same segment.
-    fn is_movable(inst: &Instruction) -> bool {
+    pub(crate) fn is_movable(inst: &Instruction) -> bool {
         if matches!(inst.kind, InstKind::Phi(_) | InstKind::Gas | InstKind::MSize) {
             return false;
         }

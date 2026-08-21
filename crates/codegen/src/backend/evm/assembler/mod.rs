@@ -83,7 +83,7 @@ pub(in crate::backend::evm) struct PreparedAssembly {
 }
 
 /// Relocating assembler for finalized EVM IR.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Assembler<'gcx> {
     pub(in crate::backend::evm) gcx: Gcx<'gcx>,
     /// Artifact whose labels are being laid out.

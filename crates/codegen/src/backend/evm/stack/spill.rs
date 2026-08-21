@@ -24,7 +24,7 @@ pub(crate) struct SpillSlot {
 }
 
 /// Manages memory slots for spilled MIR values.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SpillManager {
     /// Map from value to its spill slot.
     slots: FxHashMap<ValueId, SpillSlot>,

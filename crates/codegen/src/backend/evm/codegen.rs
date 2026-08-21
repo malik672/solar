@@ -35,6 +35,10 @@ use crate::{
         MirPhase, Module, Terminator, ValueId,
     },
     pass::run_pipeline,
+    transform::evm_inst_schedule::{
+        EvmInstSchedule, PhysicalScheduleCandidate, bounded_physical_schedule_candidates,
+        physical_schedule_candidates,
+    },
 };
 use alloy_primitives::U256;
 use smallvec::SmallVec;
@@ -46,6 +50,7 @@ use solar_data_structures::{
 };
 use solar_interface::sym;
 use solar_sema::Gcx;
+use std::time::Instant;
 
 mod switch;
 
@@ -58,6 +63,7 @@ const GLOBAL_STACK_MIN_BLOCKS: usize = 8;
 const GLOBAL_STACK_MIN_ARG_USES: usize = 6;
 const GLOBAL_STACK_DENSE_AMORTIZATION_BLOCKS: usize = 16;
 const STACK_ARG_ROTATION_LIMIT: usize = 16;
+const PHYSICAL_REPLAY_TARGET: &str = "solar_codegen::evm_inst_schedule::physical_replay";
 
 #[derive(Default)]
 struct GeneratedCode {
@@ -69,6 +75,236 @@ struct PreparedDeploymentPrefix {
     assembly: PreparedAssembly,
     constructor_arg_offset: Option<DeferredConst>,
     runtime_offset: DeferredConst,
+}
+
+#[derive(Clone, Debug)]
+struct PhysicalReplayStart {
+    instruction_lengths: Vec<usize>,
+    terminators: Vec<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PhysicalReplayScore {
+    instructions: usize,
+    terminators: usize,
+    estimated_bytes: usize,
+    estimated_static_gas: usize,
+    encoded_pushes: usize,
+    dups: usize,
+    swaps: usize,
+    pops: usize,
+    mloads: usize,
+    mstores: usize,
+    spill_bytes: u64,
+    peak_stack: usize,
+}
+
+impl PhysicalReplayStart {
+    fn capture(asm: &Assembler<'_>) -> Self {
+        Self {
+            instruction_lengths: asm
+                .program
+                .blocks
+                .iter()
+                .map(|block| block.instructions.len())
+                .collect(),
+            terminators: asm
+                .program
+                .blocks
+                .iter()
+                .map(|block| block.terminator.is_some())
+                .collect(),
+        }
+    }
+
+    fn score(&self, codegen: &EvmCodegen<'_>) -> PhysicalReplayScore {
+        let mut score = PhysicalReplayScore {
+            spill_bytes: u64::from(codegen.scheduler.spills.spill_area_size()),
+            peak_stack: codegen.scheduler.stack.max_depth(),
+            ..PhysicalReplayScore::default()
+        };
+
+        for (index, block) in codegen.asm.program.blocks.iter().enumerate() {
+            let start = self.instruction_lengths.get(index).copied().unwrap_or_default();
+            for inst in &block.instructions[start..] {
+                score.instructions += 1;
+                score.encoded_pushes += usize::from(inst.is_encoded_push());
+                if inst.is_encoded_push() {
+                    let (bytes, gas) = if let Some(size) = inst.immutable_type_size() {
+                        (usize::from(size.bytes()) + 1, 3)
+                    } else if inst.deferred_push().is_some() {
+                        (2, 3)
+                    } else if let Some(value) = inst.pushed_value() {
+                        ir::immediate_materialization_cost(codegen.gcx.sess.opts.evm_version, value)
+                    } else {
+                        // Block and data references are unresolved until whole-artifact layout.
+                        (2, 3)
+                    };
+                    score.estimated_bytes += bytes;
+                    score.estimated_static_gas += gas;
+                } else {
+                    score.estimated_bytes += 1;
+                    score.estimated_static_gas += match inst.opcode {
+                        op::POP => 2,
+                        _ => 3,
+                    };
+                    match inst.opcode {
+                        op::DUP1..=op::DUP16 => score.dups += 1,
+                        op::SWAP1..=op::SWAP16 => score.swaps += 1,
+                        op::POP => score.pops += 1,
+                        op::MLOAD => score.mloads += 1,
+                        op::MSTORE | op::MSTORE8 => score.mstores += 1,
+                        _ => {}
+                    }
+                }
+            }
+            let had_terminator = self.terminators.get(index).copied().unwrap_or_default();
+            score.terminators += usize::from(!had_terminator && block.terminator.is_some());
+        }
+        score
+    }
+}
+
+impl PhysicalReplayScore {
+    fn key(self, optimization: OptimizationMode) -> (usize, usize, u64, usize, usize) {
+        match optimization {
+            OptimizationMode::Size => (
+                self.estimated_bytes,
+                self.estimated_static_gas,
+                self.spill_bytes,
+                self.peak_stack,
+                self.instructions,
+            ),
+            _ => (
+                self.estimated_static_gas,
+                self.estimated_bytes,
+                self.spill_bytes,
+                self.peak_stack,
+                self.instructions,
+            ),
+        }
+    }
+}
+
+const PHYSICAL_LOOKAHEAD_DEPTHS: [usize; 1] = [2];
+const PHYSICAL_STRATIFIED_SLACK_WIDTHS: [usize; 1] = [2];
+
+#[derive(Clone, Copy, Debug)]
+struct PhysicalBeamResult {
+    slack_width: Option<usize>,
+    lookahead: usize,
+    optimum_hit: bool,
+    gas_regret: usize,
+    byte_regret: usize,
+    states_expanded: usize,
+    backend_transactions: usize,
+    replay_micros: u64,
+    first_prune_rank: Option<usize>,
+    first_prune_depth: Option<usize>,
+    winner: PhysicalReplayScore,
+}
+
+#[derive(Clone, Debug)]
+struct PhysicalScheduleChoice {
+    block: BlockId,
+    range: std::ops::Range<usize>,
+    order: Vec<InstId>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PhysicalPlanningState {
+    candidates: Vec<PhysicalScheduleCandidate>,
+    groups: FxHashMap<(BlockId, usize), (usize, usize)>,
+    choices: Vec<PhysicalScheduleChoice>,
+}
+
+impl PhysicalPlanningState {
+    fn new(candidates: Vec<PhysicalScheduleCandidate>) -> Self {
+        let mut groups = FxHashMap::default();
+        let mut start = 0;
+        while start < candidates.len() {
+            let candidate = &candidates[start];
+            let mut end = start + 1;
+            while end < candidates.len()
+                && candidates[end].block == candidate.block
+                && candidates[end].range == candidate.range
+            {
+                end += 1;
+            }
+            groups.insert((candidate.block, candidate.range.start), (start, end));
+            start = end;
+        }
+        Self { candidates, groups, choices: Vec::new() }
+    }
+}
+
+#[derive(Clone)]
+struct PersistentPhysicalState<'gcx> {
+    prefix: Vec<InstId>,
+    backend: EvmCodegen<'gcx>,
+    score: PhysicalReplayScore,
+    pressure: usize,
+}
+
+#[derive(Clone)]
+struct CompactPhysicalState {
+    prefix: Vec<InstId>,
+    scheduler: StackScheduler,
+    spill_addr_consts: FxHashMap<u64, (DeferredConst, usize)>,
+    instructions: Vec<ir::Instruction>,
+    label_relocations: Vec<(ir::BlockId, usize, Label)>,
+    deferred_relocations: Vec<(ir::BlockId, usize, DeferredConst)>,
+    indexed_jump_relocations: Vec<(ir::BlockId, Vec<Label>)>,
+    alloc_relocations: Vec<(ir::BlockId, usize, DeferredAlloc)>,
+    score: PhysicalReplayScore,
+    pressure: usize,
+}
+
+#[derive(Clone, Copy)]
+struct CompactPhysicalRoot {
+    block: ir::BlockId,
+    instructions: usize,
+    label_relocations: usize,
+    deferred_relocations: usize,
+    indexed_jump_relocations: usize,
+    alloc_relocations: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PhysicalBeamCensus {
+    regions: usize,
+    optimum_hits: usize,
+    gas_regret: usize,
+    byte_regret: usize,
+    worst_gas_regret: usize,
+    worst_byte_regret: usize,
+    states_expanded: usize,
+    backend_transactions: usize,
+    replay_micros: u64,
+    first_prunes: usize,
+    first_prune_rank_sum: usize,
+    first_prune_rank_max: usize,
+    first_prune_depth_sum: usize,
+}
+
+impl PhysicalBeamCensus {
+    fn record(&mut self, result: PhysicalBeamResult) {
+        self.regions += 1;
+        self.optimum_hits += usize::from(result.optimum_hit);
+        self.gas_regret += result.gas_regret;
+        self.byte_regret += result.byte_regret;
+        self.worst_gas_regret = self.worst_gas_regret.max(result.gas_regret);
+        self.worst_byte_regret = self.worst_byte_regret.max(result.byte_regret);
+        self.states_expanded += result.states_expanded;
+        self.backend_transactions += result.backend_transactions;
+        self.replay_micros += result.replay_micros;
+        if let (Some(rank), Some(depth)) = (result.first_prune_rank, result.first_prune_depth) {
+            self.first_prunes += 1;
+            self.first_prune_rank_sum += rank;
+            self.first_prune_rank_max = self.first_prune_rank_max.max(rank);
+            self.first_prune_depth_sum += depth;
+        }
+    }
 }
 
 /// Describes the stack effect of an EVM instruction.
@@ -600,6 +836,7 @@ impl<'a> StackPhiPlanner<'a> {
 }
 
 /// EVM code generator.
+#[derive(Clone)]
 pub struct EvmCodegen<'gcx> {
     gcx: Gcx<'gcx>,
     /// The assembler for bytecode generation.
@@ -724,6 +961,12 @@ pub struct EvmCodegen<'gcx> {
     switch_gas_code_growth_remaining: usize,
     capture_mir: bool,
     capture_evm_ir: bool,
+    /// Prevents analysis-only shadow emission from recursively starting another replay.
+    physical_replay_active: bool,
+    /// Stops an analysis-only replay after this many instructions in one MIR block.
+    physical_replay_stop: Option<(BlockId, usize)>,
+    /// Bounded physical choices collected during one ordinary shadow emission.
+    physical_planning: Option<PhysicalPlanningState>,
 }
 
 impl<'gcx> EvmCodegen<'gcx> {
@@ -779,6 +1022,9 @@ impl<'gcx> EvmCodegen<'gcx> {
             switch_gas_code_growth_remaining,
             capture_mir: false,
             capture_evm_ir: false,
+            physical_replay_active: false,
+            physical_replay_stop: None,
+            physical_planning: None,
         }
     }
 
@@ -1692,8 +1938,1418 @@ impl<'gcx> EvmCodegen<'gcx> {
         !func.attributes.is_constructor
     }
 
+    /// Replays exact semantic-pressure alternatives through the complete physical emitter.
+    ///
+    /// Each replay starts from the identical backend state immediately before this function body
+    /// and runs through the ordinary liveness, spill, operand-planning, and block-exit paths. The
+    /// cloned state is discarded unless `emit_winners` is set, in which case winning region orders
+    /// are returned in a cloned function for ordinary backend emission.
+    fn audit_physical_schedules(
+        &mut self,
+        func_id: FunctionId,
+        func: &Function,
+        emit_winners: bool,
+    ) -> Option<Function> {
+        let report = tracing::enabled!(target: PHYSICAL_REPLAY_TARGET, tracing::Level::DEBUG);
+        let candidates = if emit_winners && !report {
+            bounded_physical_schedule_candidates(func, EvmInstSchedule::is_movable)
+        } else {
+            physical_schedule_candidates(func, EvmInstSchedule::is_movable)
+        };
+        if candidates.is_empty() {
+            return None;
+        }
+        if emit_winners && !report {
+            return self.select_compact_physical_schedules(func_id, func, &candidates);
+        }
+
+        let baseline = self.replay_physical_schedule(func_id, func);
+        let mut fewer_instructions = 0;
+        let mut fewer_stack_ops = 0;
+        let mut fewer_spill_bytes = 0;
+        let mut lower_peak_stack = 0;
+        let mut scores = Vec::with_capacity(candidates.len());
+
+        for (index, candidate) in candidates.iter().enumerate() {
+            let mut alternative = func.clone();
+            alternative.blocks[candidate.block].instructions[candidate.range.clone()]
+                .copy_from_slice(&candidate.order);
+            let score = self.replay_physical_schedule(func_id, &alternative);
+            fewer_instructions += usize::from(score.instructions < baseline.instructions);
+            fewer_stack_ops += usize::from(
+                score.dups + score.swaps + score.pops
+                    < baseline.dups + baseline.swaps + baseline.pops,
+            );
+            fewer_spill_bytes += usize::from(score.spill_bytes < baseline.spill_bytes);
+            lower_peak_stack += usize::from(score.peak_stack < baseline.peak_stack);
+            scores.push(score);
+
+            tracing::debug!(
+                target: PHYSICAL_REPLAY_TARGET,
+                function = %func.name,
+                candidate = index,
+                candidate_kind = ?candidate.kind,
+                exhaustive = candidate.exhaustive,
+                region_orders = candidate.region_orders,
+                block = candidate.block.index(),
+                range_start = candidate.range.start,
+                range_end = candidate.range.end,
+                current_mir_peak = candidate.current_peak,
+                candidate_mir_peak = candidate.candidate_peak,
+                current_mir_area = candidate.current_area,
+                candidate_mir_area = candidate.candidate_area,
+                baseline = ?baseline,
+                candidate_score = ?score,
+                "physical replay of semantic-pressure candidate"
+            );
+        }
+
+        let optimization = self.gcx.sess.opts.optimization;
+        let mut exhaustive_regions = 0;
+        let mut dfs_suboptimal = 0;
+        let mut minimum_pressure_suboptimal = 0;
+        let mut optimum_above_minimum_pressure = 0;
+        let mut gas_regret = 0;
+        let mut byte_regret = 0;
+        let mut beam_census = FxHashMap::<(Option<usize>, usize), PhysicalBeamCensus>::default();
+        let mut emitted = emit_winners.then(|| func.clone());
+        let mut emitted_changed = false;
+        let mut start = 0;
+        while start < candidates.len() {
+            let candidate = &candidates[start];
+            let mut end = start + 1;
+            while end < candidates.len()
+                && candidates[end].block == candidate.block
+                && candidates[end].range == candidate.range
+            {
+                end += 1;
+            }
+            if candidate.exhaustive {
+                exhaustive_regions += 1;
+                let minimum_pressure = std::iter::once(candidate.current_peak)
+                    .chain(candidates[start..end].iter().map(|candidate| candidate.candidate_peak))
+                    .min()
+                    .unwrap();
+                let mut best_score = baseline;
+                let mut best_pressure = candidate.current_peak;
+                let mut best_kind = "dfs";
+                let mut minimum_pressure_score =
+                    (candidate.current_peak == minimum_pressure).then_some(baseline);
+
+                for index in start..end {
+                    let candidate_score = scores[index];
+                    let candidate_pressure = candidates[index].candidate_peak;
+                    if candidate_score.key(optimization) < best_score.key(optimization) {
+                        best_score = candidate_score;
+                        best_pressure = candidate_pressure;
+                        best_kind = "alternative";
+                    } else if candidate_score.key(optimization) == best_score.key(optimization)
+                        && candidate_pressure < best_pressure
+                    {
+                        best_pressure = candidate_pressure;
+                        best_kind = "alternative-tie";
+                    }
+                    if candidate_pressure == minimum_pressure
+                        && minimum_pressure_score.is_none_or(|score| {
+                            candidate_score.key(optimization) < score.key(optimization)
+                        })
+                    {
+                        minimum_pressure_score = Some(candidate_score);
+                    }
+                }
+
+                let minimum_pressure_score = minimum_pressure_score.unwrap();
+                dfs_suboptimal +=
+                    usize::from(best_score.key(optimization) < baseline.key(optimization));
+                minimum_pressure_suboptimal += usize::from(
+                    best_score.key(optimization) < minimum_pressure_score.key(optimization),
+                );
+                optimum_above_minimum_pressure += usize::from(best_pressure > minimum_pressure);
+                gas_regret +=
+                    baseline.estimated_static_gas.saturating_sub(best_score.estimated_static_gas);
+                byte_regret += baseline.estimated_bytes.saturating_sub(best_score.estimated_bytes);
+
+                tracing::debug!(
+                    target: PHYSICAL_REPLAY_TARGET,
+                    function = %func.name,
+                    block = candidate.block.index(),
+                    range_start = candidate.range.start,
+                    range_end = candidate.range.end,
+                    topological_orders = candidate.region_orders,
+                    minimum_pressure,
+                    best_pressure,
+                    best_kind,
+                    dfs_score = ?baseline,
+                    minimum_pressure_score = ?minimum_pressure_score,
+                    best_score = ?best_score,
+                    "exhaustive physical scheduling result"
+                );
+
+                let expected = report.then(|| {
+                    let beam_results = self.audit_physical_beam_region(
+                        func_id,
+                        func,
+                        candidate,
+                        &candidates[start..end],
+                        &scores[start..end],
+                        baseline,
+                        optimization,
+                    );
+                    let expected = beam_results
+                        .iter()
+                        .find(|result| result.slack_width == Some(2) && result.lookahead == 2)
+                        .expect("the frozen reconstruction reference must run")
+                        .winner;
+                    for result in beam_results {
+                        beam_census
+                            .entry((result.slack_width, result.lookahead))
+                            .or_default()
+                            .record(result);
+                    }
+                    self.audit_persistent_physical_beam_region(
+                        func_id,
+                        func,
+                        candidate,
+                        &candidates[start..end],
+                        &scores[start..end],
+                        baseline,
+                        optimization,
+                        expected,
+                    );
+                    expected
+                });
+                if let Some(order) = self.audit_compact_physical_beam_region(
+                    func_id,
+                    func,
+                    candidate,
+                    &candidates[start..end],
+                    Some(&scores[start..end]),
+                    Some(baseline),
+                    optimization,
+                    expected,
+                    None,
+                    None,
+                ) && let Some(emitted) = &mut emitted
+                {
+                    emitted.blocks[candidate.block].instructions[candidate.range.clone()]
+                        .copy_from_slice(&order);
+                    emitted_changed = true;
+                }
+            }
+            start = end;
+        }
+
+        for ((slack_width, lookahead), census) in beam_census {
+            tracing::debug!(
+                target: PHYSICAL_REPLAY_TARGET,
+                function = %func.name,
+                beam = slack_width.map_or("ordinary-8".to_owned(), |width| format!("8+{width}")),
+                lookahead,
+                regions = census.regions,
+                optimum_hits = census.optimum_hits,
+                gas_regret = census.gas_regret,
+                byte_regret = census.byte_regret,
+                worst_gas_regret = census.worst_gas_regret,
+                worst_byte_regret = census.worst_byte_regret,
+                states_expanded = census.states_expanded,
+                backend_transactions = census.backend_transactions,
+                replay_micros = census.replay_micros,
+                first_prunes = census.first_prunes,
+                mean_first_prune_rank = census.first_prune_rank_sum.checked_div(census.first_prunes).unwrap_or_default(),
+                max_first_prune_rank = census.first_prune_rank_max,
+                mean_first_prune_depth = census.first_prune_depth_sum.checked_div(census.first_prunes).unwrap_or_default(),
+                "integrated physical beam census"
+            );
+        }
+
+        tracing::debug!(
+            target: PHYSICAL_REPLAY_TARGET,
+            function = %func.name,
+            candidates = candidates.len(),
+            fewer_instructions,
+            fewer_stack_ops,
+            fewer_spill_bytes,
+            lower_peak_stack,
+            exhaustive_regions,
+            dfs_suboptimal,
+            minimum_pressure_suboptimal,
+            optimum_above_minimum_pressure,
+            gas_regret,
+            byte_regret,
+            baseline = ?baseline,
+            "physical scheduling replay census"
+        );
+
+        let emitted = emitted.filter(|_| emitted_changed)?;
+        // Region-local winners can change the physical entry state of later regions. Re-run the
+        // combined function and require a Pareto improvement before exposing it to real emission.
+        let combined = self.replay_physical_schedule(func_id, &emitted);
+        let dominates_baseline = combined.estimated_static_gas <= baseline.estimated_static_gas
+            && combined.estimated_bytes <= baseline.estimated_bytes
+            && combined.spill_bytes <= baseline.spill_bytes;
+        (dominates_baseline && combined.key(optimization) < baseline.key(optimization))
+            .then_some(emitted)
+    }
+
+    /// Selects compact physical-beam winners without exhaustively replaying every legal order.
+    fn select_compact_physical_schedules(
+        &mut self,
+        func_id: FunctionId,
+        func: &Function,
+        candidates: &[PhysicalScheduleCandidate],
+    ) -> Option<Function> {
+        let optimization = self.gcx.sess.opts.optimization;
+        let mut emitted = func.clone();
+        let mut changed = false;
+        let mut start = 0;
+        while start < candidates.len() {
+            let candidate = &candidates[start];
+            let mut end = start + 1;
+            while end < candidates.len()
+                && candidates[end].block == candidate.block
+                && candidates[end].range == candidate.range
+            {
+                end += 1;
+            }
+            if let Some(order) = self.audit_compact_physical_beam_region(
+                func_id,
+                func,
+                candidate,
+                &candidates[start..end],
+                None,
+                None,
+                optimization,
+                None,
+                None,
+                None,
+            ) {
+                emitted.blocks[candidate.block].instructions[candidate.range.clone()]
+                    .copy_from_slice(&order);
+                changed = true;
+            }
+            start = end;
+        }
+
+        if !changed {
+            return None;
+        }
+
+        // Compact scores stop at region exits. Certify their combined whole-function effect using
+        // the ordinary backend before exposing the chosen order to real emission.
+        let baseline = self.replay_physical_schedule(func_id, func);
+        let combined = self.replay_physical_schedule(func_id, &emitted);
+        let dominates_baseline = combined.estimated_static_gas <= baseline.estimated_static_gas
+            && combined.estimated_bytes <= baseline.estimated_bytes
+            && combined.spill_bytes <= baseline.spill_bytes;
+        (dominates_baseline && combined.key(optimization) < baseline.key(optimization))
+            .then_some(emitted)
+    }
+
+    fn replay_physical_schedule(
+        &self,
+        func_id: FunctionId,
+        func: &Function,
+    ) -> PhysicalReplayScore {
+        let mut shadow = self.clone();
+        shadow.physical_replay_active = true;
+        let start = PhysicalReplayStart::capture(&shadow.asm);
+        shadow.generate_function_body(func_id, func);
+        shadow.record_function_spill_size(func_id);
+        start.score(&shadow)
+    }
+
+    fn replay_physical_prefix(
+        &self,
+        func_id: FunctionId,
+        func: &Function,
+        block: BlockId,
+        stop: usize,
+    ) -> PhysicalReplayScore {
+        let mut shadow = self.clone();
+        shadow.physical_replay_active = true;
+        shadow.physical_replay_stop = Some((block, stop));
+        let start = PhysicalReplayStart::capture(&shadow.asm);
+        shadow.generate_function_body(func_id, func);
+        start.score(&shadow)
+    }
+
+    /// Creates one resumable backend transaction immediately before a MIR region.
+    fn replay_physical_state_until(
+        &self,
+        func_id: FunctionId,
+        func: &Function,
+        block: BlockId,
+        stop: usize,
+    ) -> Self {
+        let mut shadow = self.clone();
+        shadow.physical_replay_active = true;
+        shadow.physical_replay_stop = Some((block, stop));
+        shadow.generate_function_body(func_id, func);
+        shadow.physical_replay_stop = None;
+        shadow
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_persistent_physical_state(
+        &self,
+        parent: &PersistentPhysicalState<'gcx>,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        next: InstId,
+        completion: &[InstId],
+        root: &PhysicalReplayStart,
+        base_liveness: &Liveness,
+    ) -> PersistentPhysicalState<'gcx> {
+        let mut backend = parent.backend.clone();
+        let mut alternative = func.clone();
+        alternative.blocks[region.block].instructions[region.range.clone()]
+            .copy_from_slice(completion);
+        let mut liveness = base_liveness.clone();
+        liveness.recompute_block_last_uses(&alternative, region.block);
+        let inst_idx = region.range.start + parent.prefix.len();
+        backend.generate_block_inst(func_id, next, &alternative, &liveness, region.block, inst_idx);
+        let mut prefix = parent.prefix.clone();
+        prefix.push(next);
+        let score = root.score(&backend);
+        PersistentPhysicalState { prefix, backend, score, pressure: parent.pressure }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_persistent_physical_child(
+        &self,
+        parent: &PersistentPhysicalState<'gcx>,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        next: InstId,
+        completion: &[InstId],
+        root: &PhysicalReplayStart,
+        base_liveness: &Liveness,
+        cache: &mut FxHashMap<Vec<InstId>, PersistentPhysicalState<'gcx>>,
+        transactions: &mut usize,
+    ) -> PersistentPhysicalState<'gcx> {
+        let mut prefix = parent.prefix.clone();
+        prefix.push(next);
+        if let Some(state) = cache.get(&prefix) {
+            return state.clone();
+        }
+        *transactions += 1;
+        let child = self.advance_persistent_physical_state(
+            parent,
+            func_id,
+            func,
+            region,
+            next,
+            completion,
+            root,
+            base_liveness,
+        );
+        cache.insert(prefix, child.clone());
+        child
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persistent_physical_lookahead(
+        &self,
+        state: &PersistentPhysicalState<'gcx>,
+        depth: usize,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        schedules: &[(Vec<InstId>, usize, PhysicalReplayScore)],
+        root: &PhysicalReplayStart,
+        optimization: OptimizationMode,
+        base_liveness: &Liveness,
+        cache: &mut FxHashMap<Vec<InstId>, PersistentPhysicalState<'gcx>>,
+        transactions: &mut usize,
+    ) -> PhysicalReplayScore {
+        if state.prefix.len() == region.range.len() {
+            return schedules
+                .iter()
+                .find(|(schedule, _, _)| schedule == &state.prefix)
+                .map(|(_, _, score)| *score)
+                .unwrap_or(state.score);
+        }
+        if depth == 0 {
+            return state.score;
+        }
+        let next_depth = state.prefix.len();
+        let mut children = FxHashMap::<InstId, usize>::default();
+        for (index, (schedule, _, _)) in schedules.iter().enumerate() {
+            if schedule.starts_with(&state.prefix) {
+                children.entry(schedule[next_depth]).or_insert(index);
+            }
+        }
+        children
+            .into_iter()
+            .map(|(next, completion)| {
+                let child = self.cached_persistent_physical_child(
+                    state,
+                    func_id,
+                    func,
+                    region,
+                    next,
+                    &schedules[completion].0,
+                    root,
+                    base_liveness,
+                    cache,
+                    transactions,
+                );
+                self.persistent_physical_lookahead(
+                    &child,
+                    depth - 1,
+                    func_id,
+                    func,
+                    region,
+                    schedules,
+                    root,
+                    optimization,
+                    base_liveness,
+                    cache,
+                    transactions,
+                )
+            })
+            .min_by_key(|score| score.key(optimization))
+            .unwrap_or(state.score)
+    }
+
+    fn compact_physical_root(&self) -> CompactPhysicalRoot {
+        let block = self.asm.current_block.expect("region replay must have an active EVM block");
+        CompactPhysicalRoot {
+            block,
+            instructions: self.asm.program.blocks[block].instructions.len(),
+            label_relocations: self.asm.label_relocations.len(),
+            deferred_relocations: self.asm.deferred_relocations.len(),
+            indexed_jump_relocations: self.asm.indexed_jump_relocations.len(),
+            alloc_relocations: self.asm.alloc_relocations.len(),
+        }
+    }
+
+    fn capture_compact_physical_state(
+        &self,
+        root: CompactPhysicalRoot,
+        score_root: &PhysicalReplayStart,
+        prefix: Vec<InstId>,
+        pressure: usize,
+    ) -> CompactPhysicalState {
+        CompactPhysicalState {
+            prefix,
+            scheduler: self.scheduler.clone(),
+            spill_addr_consts: self.spill_addr_consts.clone(),
+            instructions: self.asm.program.blocks[root.block].instructions[root.instructions..]
+                .to_vec(),
+            label_relocations: self.asm.label_relocations[root.label_relocations..].to_vec(),
+            deferred_relocations: self.asm.deferred_relocations[root.deferred_relocations..]
+                .to_vec(),
+            indexed_jump_relocations: self.asm.indexed_jump_relocations
+                [root.indexed_jump_relocations..]
+                .to_vec(),
+            alloc_relocations: self.asm.alloc_relocations[root.alloc_relocations..].to_vec(),
+            score: score_root.score(self),
+            pressure,
+        }
+    }
+
+    fn restore_compact_physical_state(
+        &mut self,
+        root: CompactPhysicalRoot,
+        state: &CompactPhysicalState,
+    ) {
+        self.scheduler.clone_from(&state.scheduler);
+        self.spill_addr_consts.clone_from(&state.spill_addr_consts);
+        let instructions = &mut self.asm.program.blocks[root.block].instructions;
+        instructions.truncate(root.instructions);
+        instructions.extend_from_slice(&state.instructions);
+        self.asm.label_relocations.truncate(root.label_relocations);
+        self.asm.label_relocations.extend_from_slice(&state.label_relocations);
+        self.asm.deferred_relocations.truncate(root.deferred_relocations);
+        self.asm.deferred_relocations.extend_from_slice(&state.deferred_relocations);
+        self.asm.indexed_jump_relocations.truncate(root.indexed_jump_relocations);
+        self.asm.indexed_jump_relocations.extend_from_slice(&state.indexed_jump_relocations);
+        self.asm.alloc_relocations.truncate(root.alloc_relocations);
+        self.asm.alloc_relocations.extend_from_slice(&state.alloc_relocations);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_compact_physical_state(
+        &mut self,
+        parent: &CompactPhysicalState,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        next: InstId,
+        completion: &[InstId],
+        root: CompactPhysicalRoot,
+        score_root: &PhysicalReplayStart,
+        liveness: &mut Liveness,
+    ) -> CompactPhysicalState {
+        self.restore_compact_physical_state(root, parent);
+        liveness.recompute_block_last_uses_with_region(
+            func,
+            region.block,
+            region.range.clone(),
+            completion,
+        );
+        let inst_idx = region.range.start + parent.prefix.len();
+        self.generate_block_inst(func_id, next, func, liveness, region.block, inst_idx);
+        let mut prefix = parent.prefix.clone();
+        prefix.push(next);
+        self.capture_compact_physical_state(root, score_root, prefix, parent.pressure)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_compact_physical_child(
+        &mut self,
+        parent: &CompactPhysicalState,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        next: InstId,
+        completion: &[InstId],
+        root: CompactPhysicalRoot,
+        score_root: &PhysicalReplayStart,
+        liveness: &mut Liveness,
+        cache: &mut FxHashMap<Vec<InstId>, CompactPhysicalState>,
+        transactions: &mut usize,
+    ) -> CompactPhysicalState {
+        let mut prefix = parent.prefix.clone();
+        prefix.push(next);
+        if let Some(state) = cache.get(&prefix) {
+            return state.clone();
+        }
+        *transactions += 1;
+        let child = self.advance_compact_physical_state(
+            parent, func_id, func, region, next, completion, root, score_root, liveness,
+        );
+        cache.insert(prefix, child.clone());
+        child
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compact_physical_lookahead(
+        &mut self,
+        state: &CompactPhysicalState,
+        depth: usize,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        schedules: &[(Vec<InstId>, usize, Option<PhysicalReplayScore>)],
+        root: CompactPhysicalRoot,
+        score_root: &PhysicalReplayStart,
+        optimization: OptimizationMode,
+        liveness: &mut Liveness,
+        cache: &mut FxHashMap<Vec<InstId>, CompactPhysicalState>,
+        transactions: &mut usize,
+    ) -> PhysicalReplayScore {
+        if state.prefix.len() == region.range.len() {
+            return schedules
+                .iter()
+                .find(|(schedule, _, _)| schedule == &state.prefix)
+                .and_then(|(_, _, score)| *score)
+                .unwrap_or(state.score);
+        }
+        if depth == 0 {
+            return state.score;
+        }
+        let next_depth = state.prefix.len();
+        let mut children = FxHashMap::<InstId, usize>::default();
+        for (index, (schedule, _, _)) in schedules.iter().enumerate() {
+            if schedule.starts_with(&state.prefix) {
+                children.entry(schedule[next_depth]).or_insert(index);
+            }
+        }
+        children
+            .into_iter()
+            .map(|(next, completion)| {
+                let child = self.cached_compact_physical_child(
+                    state,
+                    func_id,
+                    func,
+                    region,
+                    next,
+                    &schedules[completion].0,
+                    root,
+                    score_root,
+                    liveness,
+                    cache,
+                    transactions,
+                );
+                self.compact_physical_lookahead(
+                    &child,
+                    depth - 1,
+                    func_id,
+                    func,
+                    region,
+                    schedules,
+                    root,
+                    score_root,
+                    optimization,
+                    liveness,
+                    cache,
+                    transactions,
+                )
+            })
+            .min_by_key(|score| score.key(optimization))
+            .unwrap_or(state.score)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_physical_prefix_score(
+        &self,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        schedule: &[InstId],
+        prefix: &[InstId],
+        cache: &mut FxHashMap<Vec<InstId>, (PhysicalReplayScore, u64)>,
+        seen: &mut FxHashSet<Vec<InstId>>,
+        backend_transactions: &mut usize,
+        replay_micros: &mut u64,
+    ) -> PhysicalReplayScore {
+        let (score, micros) = if let Some(&(score, micros)) = cache.get(prefix) {
+            (score, micros)
+        } else {
+            let mut alternative = func.clone();
+            alternative.blocks[region.block].instructions[region.range.clone()]
+                .copy_from_slice(schedule);
+            let started = Instant::now();
+            let score = self.replay_physical_prefix(
+                func_id,
+                &alternative,
+                region.block,
+                region.range.start + prefix.len(),
+            );
+            let micros = started.elapsed().as_micros().try_into().unwrap_or(u64::MAX);
+            cache.insert(prefix.to_vec(), (score, micros));
+            (score, micros)
+        };
+        if seen.insert(prefix.to_vec()) {
+            *backend_transactions += 1;
+            *replay_micros += micros;
+        }
+        score
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn audit_physical_beam_region(
+        &self,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        candidates: &[PhysicalScheduleCandidate],
+        scores: &[PhysicalReplayScore],
+        baseline: PhysicalReplayScore,
+        optimization: OptimizationMode,
+    ) -> Vec<PhysicalBeamResult> {
+        let current = func.blocks[region.block].instructions[region.range.clone()].to_vec();
+        let mut schedules = Vec::with_capacity(candidates.len() + 1);
+        schedules.push((current, region.current_peak, baseline));
+        schedules.extend(
+            candidates.iter().zip(scores).map(|(candidate, &score)| {
+                (candidate.order.clone(), candidate.candidate_peak, score)
+            }),
+        );
+
+        let minimum_pressure = schedules.iter().map(|(_, pressure, _)| *pressure).min().unwrap();
+        let physical_optimum = schedules
+            .iter()
+            .map(|(_, _, score)| *score)
+            .min_by_key(|score| score.key(optimization))
+            .unwrap();
+        let instruction_count = region.range.len();
+        let mut shared_prefix_scores =
+            FxHashMap::<Vec<InstId>, (PhysicalReplayScore, u64)>::default();
+        let mut results = Vec::new();
+        let configurations =
+            std::iter::once(None).chain(PHYSICAL_STRATIFIED_SLACK_WIDTHS.into_iter().map(Some));
+
+        for slack_width in configurations {
+            for lookahead in PHYSICAL_LOOKAHEAD_DEPTHS {
+                let mut beam = vec![Vec::<InstId>::new()];
+                let mut states_expanded = 0;
+                let mut backend_transactions = 0;
+                let mut replay_micros = 0;
+                let mut seen_prefixes = FxHashSet::default();
+                let mut first_prune_rank = None;
+                let mut first_prune_depth = None;
+
+                for depth in 0..instruction_count {
+                    let mut children = FxHashMap::<Vec<InstId>, usize>::default();
+                    for prefix in &beam {
+                        for (schedule_index, (schedule, pressure, _)) in
+                            schedules.iter().enumerate()
+                        {
+                            if schedule.starts_with(prefix) && *pressure <= minimum_pressure + 1 {
+                                let mut child = prefix.clone();
+                                child.push(schedule[depth]);
+                                children.entry(child).or_insert(schedule_index);
+                            }
+                        }
+                    }
+                    states_expanded += children.len();
+
+                    let mut next = children
+                        .into_iter()
+                        .map(|(prefix, completion)| {
+                            let score = if prefix.len() == instruction_count {
+                                schedules[completion].2
+                            } else {
+                                self.cached_physical_prefix_score(
+                                    func_id,
+                                    func,
+                                    region,
+                                    &schedules[completion].0,
+                                    &prefix,
+                                    &mut shared_prefix_scores,
+                                    &mut seen_prefixes,
+                                    &mut backend_transactions,
+                                    &mut replay_micros,
+                                )
+                            };
+                            let target_depth = (prefix.len() + lookahead).min(instruction_count);
+                            let rank_score = schedules
+                                .iter()
+                                .filter(|(schedule, pressure, _)| {
+                                    *pressure <= minimum_pressure + 1
+                                        && schedule.starts_with(&prefix)
+                                })
+                                .map(|(schedule, _, terminal_score)| {
+                                    if target_depth == instruction_count {
+                                        *terminal_score
+                                    } else {
+                                        self.cached_physical_prefix_score(
+                                            func_id,
+                                            func,
+                                            region,
+                                            schedule,
+                                            &schedule[..target_depth],
+                                            &mut shared_prefix_scores,
+                                            &mut seen_prefixes,
+                                            &mut backend_transactions,
+                                            &mut replay_micros,
+                                        )
+                                    }
+                                })
+                                .min_by_key(|score| score.key(optimization))
+                                .unwrap_or(score);
+                            let pressure = schedules
+                                .iter()
+                                .filter(|(schedule, _, _)| schedule.starts_with(&prefix))
+                                .map(|(_, pressure, _)| *pressure)
+                                .min()
+                                .unwrap();
+                            (prefix, score, rank_score, pressure)
+                        })
+                        .collect::<Vec<_>>();
+                    next.sort_by(|(prefix_a, _, rank_a, _), (prefix_b, _, rank_b, _)| {
+                        rank_a
+                            .key(optimization)
+                            .cmp(&rank_b.key(optimization))
+                            .then_with(|| prefix_a.cmp(prefix_b))
+                    });
+
+                    let optimal_rank = next.iter().position(|(prefix, _, _, _)| {
+                        schedules.iter().any(|(schedule, _, score)| {
+                            score.key(optimization) == physical_optimum.key(optimization)
+                                && schedule.starts_with(prefix)
+                        })
+                    });
+                    let mut retained = if let Some(slack_width) = slack_width {
+                        let mut core = next
+                            .iter()
+                            .filter(|(_, _, _, pressure)| *pressure == minimum_pressure)
+                            .take(8)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        core.extend(
+                            next.iter()
+                                .filter(|(_, _, _, pressure)| *pressure == minimum_pressure + 1)
+                                .take(slack_width)
+                                .cloned(),
+                        );
+                        core
+                    } else {
+                        next.iter().take(8).cloned().collect()
+                    };
+                    if first_prune_rank.is_none()
+                        && let Some(rank) = optimal_rank
+                        && !retained.iter().any(|(prefix, _, _, _)| {
+                            schedules.iter().any(|(schedule, _, score)| {
+                                score.key(optimization) == physical_optimum.key(optimization)
+                                    && schedule.starts_with(prefix)
+                            })
+                        })
+                    {
+                        first_prune_rank = Some(rank + 1);
+                        first_prune_depth = Some(depth + 1);
+                        let cutoff = retained.last().map(|(_, score, _, _)| *score);
+                        tracing::trace!(
+                            target: PHYSICAL_REPLAY_TARGET,
+                            function = %func.name,
+                            block = region.block.index(),
+                            range_start = region.range.start,
+                            range_end = region.range.end,
+                            beam = slack_width.map_or("ordinary-8".to_owned(), |width| format!("8+{width}")),
+                            lookahead,
+                            prune_depth = depth + 1,
+                            optimal_rank = rank + 1,
+                            cutoff_score = ?cutoff,
+                            "physical optimum first pruned"
+                        );
+                    }
+                    beam = retained.drain(..).map(|(prefix, _, _, _)| prefix).collect();
+                }
+
+                let winner = beam
+                    .iter()
+                    .filter_map(|order| {
+                        schedules
+                            .iter()
+                            .find(|(schedule, _, _)| schedule == order)
+                            .map(|(_, _, score)| *score)
+                    })
+                    .min_by_key(|score| score.key(optimization))
+                    .expect("every complete beam order must be an exhaustive schedule");
+                let result = PhysicalBeamResult {
+                    slack_width,
+                    lookahead,
+                    optimum_hit: winner.key(optimization) == physical_optimum.key(optimization),
+                    gas_regret: winner
+                        .estimated_static_gas
+                        .saturating_sub(physical_optimum.estimated_static_gas),
+                    byte_regret: winner
+                        .estimated_bytes
+                        .saturating_sub(physical_optimum.estimated_bytes),
+                    states_expanded,
+                    backend_transactions,
+                    replay_micros,
+                    first_prune_rank,
+                    first_prune_depth,
+                    winner,
+                };
+                tracing::debug!(
+                    target: PHYSICAL_REPLAY_TARGET,
+                    function = %func.name,
+                    block = region.block.index(),
+                    range_start = region.range.start,
+                    range_end = region.range.end,
+                    beam = slack_width.map_or("ordinary-8".to_owned(), |width| format!("8+{width}")),
+                    lookahead,
+                    optimum_hit = result.optimum_hit,
+                    gas_regret = result.gas_regret,
+                    byte_regret = result.byte_regret,
+                    first_prune_rank = ?result.first_prune_rank,
+                    first_prune_depth = ?result.first_prune_depth,
+                    "physical beam region result"
+                );
+                results.push(result);
+            }
+        }
+        results
+    }
+
+    /// Runs the frozen `8+2/h2` policy with resumable child backend transactions.
+    ///
+    /// This remains analysis-only. It measures the production-shaped execution strategy against
+    /// the exhaustive oracle before it is allowed to select emitted code.
+    #[allow(clippy::too_many_arguments)]
+    fn audit_persistent_physical_beam_region(
+        &self,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        candidates: &[PhysicalScheduleCandidate],
+        scores: &[PhysicalReplayScore],
+        baseline: PhysicalReplayScore,
+        optimization: OptimizationMode,
+        expected: PhysicalReplayScore,
+    ) {
+        let current = func.blocks[region.block].instructions[region.range.clone()].to_vec();
+        let mut schedules = Vec::with_capacity(candidates.len() + 1);
+        schedules.push((current, region.current_peak, baseline));
+        schedules.extend(
+            candidates.iter().zip(scores).map(|(candidate, &score)| {
+                (candidate.order.clone(), candidate.candidate_peak, score)
+            }),
+        );
+        let minimum_pressure = schedules.iter().map(|(_, pressure, _)| *pressure).min().unwrap();
+        schedules.retain(|(_, pressure, _)| *pressure <= minimum_pressure + 1);
+        let physical_optimum = schedules
+            .iter()
+            .map(|(_, _, score)| *score)
+            .min_by_key(|score| score.key(optimization))
+            .unwrap();
+
+        let started = Instant::now();
+        let base_liveness = self
+            .emitting_entry
+            .then(|| Liveness::compute_block_local_for_codegen(func))
+            .flatten()
+            .unwrap_or_else(|| Liveness::compute(func));
+        let root_backend =
+            self.replay_physical_state_until(func_id, func, region.block, region.range.start);
+        let root = PhysicalReplayStart::capture(&root_backend.asm);
+        let mut beam = vec![PersistentPhysicalState {
+            prefix: Vec::new(),
+            score: root.score(&root_backend),
+            backend: root_backend,
+            pressure: minimum_pressure,
+        }];
+        let mut states_expanded = 0;
+        let mut backend_transactions = 1;
+        let mut transaction_cache = FxHashMap::default();
+
+        for depth in 0..region.range.len() {
+            let mut next = Vec::new();
+            for parent in &beam {
+                let mut children = FxHashMap::<InstId, usize>::default();
+                for (index, (schedule, _, _)) in schedules.iter().enumerate() {
+                    if schedule.starts_with(&parent.prefix) {
+                        children.entry(schedule[depth]).or_insert(index);
+                    }
+                }
+                for (instruction, completion) in children {
+                    let mut child = self.cached_persistent_physical_child(
+                        parent,
+                        func_id,
+                        func,
+                        region,
+                        instruction,
+                        &schedules[completion].0,
+                        &root,
+                        &base_liveness,
+                        &mut transaction_cache,
+                        &mut backend_transactions,
+                    );
+                    child.pressure = schedules
+                        .iter()
+                        .filter(|(schedule, _, _)| schedule.starts_with(&child.prefix))
+                        .map(|(_, pressure, _)| *pressure)
+                        .min()
+                        .unwrap();
+                    let rank = self.persistent_physical_lookahead(
+                        &child,
+                        2,
+                        func_id,
+                        func,
+                        region,
+                        &schedules,
+                        &root,
+                        optimization,
+                        &base_liveness,
+                        &mut transaction_cache,
+                        &mut backend_transactions,
+                    );
+                    next.push((child, rank));
+                }
+            }
+            states_expanded += next.len();
+            next.sort_by(|(a, rank_a), (b, rank_b)| {
+                rank_a
+                    .key(optimization)
+                    .cmp(&rank_b.key(optimization))
+                    .then_with(|| a.prefix.cmp(&b.prefix))
+            });
+            let mut retained = next
+                .iter()
+                .filter(|(state, _)| state.pressure == minimum_pressure)
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>();
+            retained.extend(
+                next.iter()
+                    .filter(|(state, _)| state.pressure == minimum_pressure + 1)
+                    .take(2)
+                    .cloned(),
+            );
+            beam = retained.into_iter().map(|(state, _)| state).collect();
+        }
+
+        let beam_score = beam
+            .iter()
+            .filter_map(|state| {
+                schedules
+                    .iter()
+                    .find(|(schedule, _, _)| schedule == &state.prefix)
+                    .map(|(_, _, score)| *score)
+            })
+            .min_by_key(|score| score.key(optimization))
+            .unwrap();
+        assert_eq!(
+            beam_score.key(optimization),
+            expected.key(optimization),
+            "persistent physical beam diverged from reconstruction in `{}`",
+            func.name
+        );
+        let chosen = if beam_score.key(optimization) < baseline.key(optimization) {
+            beam_score
+        } else {
+            baseline
+        };
+        let (dfs_primary, chosen_primary, optimum_primary) = match optimization {
+            OptimizationMode::Size => {
+                (baseline.estimated_bytes, chosen.estimated_bytes, physical_optimum.estimated_bytes)
+            }
+            _ => (
+                baseline.estimated_static_gas,
+                chosen.estimated_static_gas,
+                physical_optimum.estimated_static_gas,
+            ),
+        };
+        let available = dfs_primary.saturating_sub(optimum_primary);
+        let captured = dfs_primary.saturating_sub(chosen_primary);
+        let capture_ppm =
+            captured.saturating_mul(1_000_000).checked_div(available).unwrap_or(1_000_000);
+        tracing::debug!(
+            target: PHYSICAL_REPLAY_TARGET,
+            function = %func.name,
+            block = region.block.index(),
+            range_start = region.range.start,
+            range_end = region.range.end,
+            optimum_hit = beam_score.key(optimization) == physical_optimum.key(optimization),
+            beam_beats_dfs = beam_score.key(optimization) < baseline.key(optimization),
+            dfs_retained = beam_score.key(optimization) >= baseline.key(optimization),
+            available_improvement = available,
+            captured_improvement = captured,
+            capture_ppm,
+            states_expanded,
+            backend_transactions,
+            elapsed_micros = started.elapsed().as_micros(),
+            "persistent physical beam result"
+        );
+    }
+
+    /// Runs `8+2/h2` while retaining only candidate-local backend mutations.
+    #[allow(clippy::too_many_arguments)]
+    fn audit_compact_physical_beam_region(
+        &self,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        candidates: &[PhysicalScheduleCandidate],
+        scores: Option<&[PhysicalReplayScore]>,
+        baseline: Option<PhysicalReplayScore>,
+        optimization: OptimizationMode,
+        expected: Option<PhysicalReplayScore>,
+        entry_backend: Option<Self>,
+        entry_liveness: Option<Liveness>,
+    ) -> Option<Vec<InstId>> {
+        let liveness = entry_liveness.unwrap_or_else(|| {
+            self.emitting_entry
+                .then(|| Liveness::compute_block_local_for_codegen(func))
+                .flatten()
+                .unwrap_or_else(|| Liveness::compute(func))
+        });
+        let mut workspace = entry_backend.unwrap_or_else(|| {
+            self.replay_physical_state_until(func_id, func, region.block, region.range.start)
+        });
+        workspace.run_compact_physical_beam_region(
+            func_id,
+            func,
+            region,
+            candidates,
+            scores,
+            baseline,
+            optimization,
+            expected,
+            liveness,
+        )
+    }
+
+    /// Evaluates one compact region transaction from the backend's current physical state.
+    #[allow(clippy::too_many_arguments)]
+    fn run_compact_physical_beam_region(
+        &mut self,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        candidates: &[PhysicalScheduleCandidate],
+        scores: Option<&[PhysicalReplayScore]>,
+        baseline: Option<PhysicalReplayScore>,
+        optimization: OptimizationMode,
+        expected: Option<PhysicalReplayScore>,
+        mut liveness: Liveness,
+    ) -> Option<Vec<InstId>> {
+        let workspace = self;
+        let current = func.blocks[region.block].instructions[region.range.clone()].to_vec();
+        let mut schedules = Vec::with_capacity(candidates.len() + 1);
+        schedules.push((current, region.current_peak, baseline));
+        schedules.extend(candidates.iter().enumerate().map(|(index, candidate)| {
+            (candidate.order.clone(), candidate.candidate_peak, scores.map(|scores| scores[index]))
+        }));
+        let minimum_pressure = schedules.iter().map(|(_, pressure, _)| *pressure).min().unwrap();
+        schedules.retain(|(_, pressure, _)| *pressure <= minimum_pressure + 1);
+
+        let started = Instant::now();
+        let score_root = PhysicalReplayStart::capture(&workspace.asm);
+        let root = workspace.compact_physical_root();
+        let root_state = workspace.capture_compact_physical_state(
+            root,
+            &score_root,
+            Vec::new(),
+            minimum_pressure,
+        );
+        let mut current_state = root_state.clone();
+        let mut beam = vec![root_state.clone()];
+        let mut states_expanded = 0;
+        let mut backend_transactions = 1;
+        let mut transaction_cache = FxHashMap::default();
+
+        for &instruction in &schedules[0].0 {
+            current_state = workspace.cached_compact_physical_child(
+                &current_state,
+                func_id,
+                func,
+                region,
+                instruction,
+                &schedules[0].0,
+                root,
+                &score_root,
+                &mut liveness,
+                &mut transaction_cache,
+                &mut backend_transactions,
+            );
+        }
+        let baseline = baseline.unwrap_or(current_state.score);
+
+        for depth in 0..region.range.len() {
+            let mut next = Vec::new();
+            for parent in &beam {
+                let mut children = FxHashMap::<InstId, usize>::default();
+                for (index, (schedule, _, _)) in schedules.iter().enumerate() {
+                    if schedule.starts_with(&parent.prefix) {
+                        children.entry(schedule[depth]).or_insert(index);
+                    }
+                }
+                for (instruction, completion) in children {
+                    let mut child = workspace.cached_compact_physical_child(
+                        parent,
+                        func_id,
+                        func,
+                        region,
+                        instruction,
+                        &schedules[completion].0,
+                        root,
+                        &score_root,
+                        &mut liveness,
+                        &mut transaction_cache,
+                        &mut backend_transactions,
+                    );
+                    child.pressure = schedules
+                        .iter()
+                        .filter(|(schedule, _, _)| schedule.starts_with(&child.prefix))
+                        .map(|(_, pressure, _)| *pressure)
+                        .min()
+                        .unwrap();
+                    let rank = workspace.compact_physical_lookahead(
+                        &child,
+                        2,
+                        func_id,
+                        func,
+                        region,
+                        &schedules,
+                        root,
+                        &score_root,
+                        optimization,
+                        &mut liveness,
+                        &mut transaction_cache,
+                        &mut backend_transactions,
+                    );
+                    next.push((child, rank));
+                }
+            }
+            states_expanded += next.len();
+            next.sort_by(|(a, rank_a), (b, rank_b)| {
+                rank_a
+                    .key(optimization)
+                    .cmp(&rank_b.key(optimization))
+                    .then_with(|| a.prefix.cmp(&b.prefix))
+            });
+            let mut retained = next
+                .iter()
+                .filter(|(state, _)| state.pressure == minimum_pressure)
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>();
+            retained.extend(
+                next.iter()
+                    .filter(|(state, _)| state.pressure == minimum_pressure + 1)
+                    .take(2)
+                    .cloned(),
+            );
+            beam = retained.into_iter().map(|(state, _)| state).collect();
+        }
+
+        let mut winner = None;
+        for state in &beam {
+            let (_, _, terminal_score) = schedules
+                .iter()
+                .find(|(schedule, _, _)| schedule == &state.prefix)
+                .expect("complete beam state must identify a legal schedule");
+            let score = terminal_score.unwrap_or(state.score);
+            if winner.as_ref().is_none_or(
+                |(_, winner_score): &(&CompactPhysicalState, PhysicalReplayScore)| {
+                    score.key(optimization) < winner_score.key(optimization)
+                },
+            ) {
+                winner = Some((state, score));
+            }
+        }
+        let (winner, beam_score) = match winner {
+            Some(winner) => winner,
+            None => {
+                workspace.restore_compact_physical_state(root, &root_state);
+                return None;
+            }
+        };
+        if let Some(expected) = expected {
+            assert_eq!(
+                beam_score.key(optimization),
+                expected.key(optimization),
+                "compact physical beam diverged from full backend in `{}`",
+                func.name
+            );
+        }
+        tracing::debug!(
+            target: PHYSICAL_REPLAY_TARGET,
+            function = %func.name,
+            block = region.block.index(),
+            range_start = region.range.start,
+            range_end = region.range.end,
+            next = ?func.blocks[region.block]
+                .instructions
+                .get(region.range.end)
+                .map(|&inst| &func.inst(inst).kind),
+            suffix_len = func.blocks[region.block].instructions.len() - region.range.end,
+            states_expanded,
+            backend_transactions,
+            elapsed_micros = started.elapsed().as_micros(),
+            beam_beats_dfs = beam_score.key(optimization) < baseline.key(optimization),
+            "compact physical beam result"
+        );
+        if beam_score.key(optimization) < baseline.key(optimization) {
+            tracing::debug!(
+                target: PHYSICAL_REPLAY_TARGET,
+                function = %func.name,
+                block = region.block.index(),
+                range_start = region.range.start,
+                range_end = region.range.end,
+                region_len = region.range.len(),
+                suffix_len = func.blocks[region.block].instructions.len() - region.range.end,
+                elapsed_micros = started.elapsed().as_micros(),
+                "compact physical beam winner"
+            );
+        }
+
+        let dominates_baseline = beam_score.estimated_static_gas <= baseline.estimated_static_gas
+            && beam_score.estimated_bytes <= baseline.estimated_bytes
+            && beam_score.spill_bytes <= baseline.spill_bytes;
+        let order = (dominates_baseline
+            && beam_score.key(optimization) < baseline.key(optimization))
+        .then(|| winner.prefix.clone());
+        workspace.restore_compact_physical_state(root, &root_state);
+        order
+    }
+
+    /// Emits the ordinary function while collecting bounded physical choices, then emits at most
+    /// one combined candidate. The ordinary emission remains in place unless that candidate
+    /// improves it, so production needs only one pre-function clone and no region-prefix replay.
+    fn try_emit_bounded_physical_schedules(
+        &mut self,
+        func_id: FunctionId,
+        func: &Function,
+    ) -> bool {
+        let candidates = bounded_physical_schedule_candidates(func, EvmInstSchedule::is_movable);
+        if candidates.is_empty() {
+            return false;
+        }
+
+        let score_root = PhysicalReplayStart::capture(&self.asm);
+        let mut candidate_backend = self.clone();
+        self.physical_replay_active = true;
+        self.physical_planning = Some(PhysicalPlanningState::new(candidates));
+        self.generate_function_body(func_id, func);
+        let baseline = score_root.score(self);
+        let planning = self
+            .physical_planning
+            .take()
+            .expect("physical planning state must survive shadow emission");
+        self.physical_replay_active = false;
+
+        if planning.choices.is_empty() {
+            return true;
+        }
+
+        let mut scheduled = func.clone();
+        for choice in planning.choices {
+            scheduled.blocks[choice.block].instructions[choice.range]
+                .copy_from_slice(&choice.order);
+        }
+
+        candidate_backend.physical_replay_active = true;
+        candidate_backend.generate_function_body(func_id, &scheduled);
+        candidate_backend.physical_replay_active = false;
+        let candidate = score_root.score(&candidate_backend);
+        let optimization = self.gcx.sess.opts.optimization;
+        let dominates_baseline = candidate.estimated_static_gas <= baseline.estimated_static_gas
+            && candidate.estimated_bytes <= baseline.estimated_bytes
+            && candidate.spill_bytes <= baseline.spill_bytes;
+        if dominates_baseline && candidate.key(optimization) < baseline.key(optimization) {
+            *self = candidate_backend;
+        }
+        true
+    }
+
+    /// Evaluates one candidate group from the physical state reached by ordinary emission.
+    fn plan_physical_region_from_current_state(
+        &mut self,
+        func_id: FunctionId,
+        func: &Function,
+        liveness: &Liveness,
+        block: BlockId,
+        inst_idx: usize,
+    ) {
+        let Some((region, candidates)) = self.physical_planning.as_ref().and_then(|planning| {
+            let &(start, end) = planning.groups.get(&(block, inst_idx))?;
+            Some((planning.candidates[start].clone(), planning.candidates[start..end].to_vec()))
+        }) else {
+            return;
+        };
+
+        if let Some(order) = self.run_compact_physical_beam_region(
+            func_id,
+            func,
+            &region,
+            &candidates,
+            None,
+            None,
+            self.gcx.sess.opts.optimization,
+            None,
+            liveness.clone(),
+        ) {
+            self.physical_planning.as_mut().unwrap().choices.push(PhysicalScheduleChoice {
+                block,
+                range: region.range,
+                order,
+            });
+        }
+    }
+
     /// Generates the body of a function.
     fn generate_function_body(&mut self, func_id: FunctionId, func: &Function) {
+        let emit_physical_beam =
+            !self.physical_replay_active && self.gcx.sess.opts.unstable.evm_physical_beam_schedule;
+        let audit_physical_beam = !emit_physical_beam
+            && !self.physical_replay_active
+            && tracing::enabled!(target: PHYSICAL_REPLAY_TARGET, tracing::Level::DEBUG);
+        if emit_physical_beam && self.try_emit_bounded_physical_schedules(func_id, func) {
+            return;
+        }
+        if audit_physical_beam {
+            let _ = self.audit_physical_schedules(func_id, func, false);
+        }
+
         let liveness = self
             .emitting_entry
             .then(|| Liveness::compute_block_local_for_codegen(func))
@@ -1799,42 +3455,21 @@ impl<'gcx> EvmCodegen<'gcx> {
 
             // Generate instructions
             for (inst_idx, &inst_id) in block.instructions.iter().enumerate() {
-                let inst = func.inst(inst_id);
-
+                if self.physical_replay_stop == Some((block_id, inst_idx)) {
+                    return;
+                }
+                if self.physical_planning.is_some() {
+                    self.plan_physical_region_from_current_state(
+                        func_id, func, liveness, block_id, inst_idx,
+                    );
+                }
                 // Skip phi instructions (they're handled by copies)
-                if matches!(inst.kind, InstKind::Phi(_)) {
+                if matches!(func.inst(inst_id).kind, InstKind::Phi(_)) {
                     continue;
                 }
-
-                // Find the value ID that corresponds to this instruction (if any)
-                let result_value = func.inst_result_value(inst_id);
-
-                // Generate the instruction
-                self.generate_inst(
-                    func_id,
-                    inst_id,
-                    func,
-                    &inst.kind,
-                    liveness,
-                    block_id,
-                    inst_idx,
-                    result_value,
-                );
-                if let Some(result) = result_value {
-                    self.spill_reserved_result_if_live(func, liveness, block_id, inst_idx, result);
-                    // A free-memory-pointer load cannot be rematerialized once
-                    // the pointer moves. Park every FMP load at its
-                    // definition so later uses reload the original value —
-                    // whether the definition crosses a block on a preserved
-                    // edge or is re-materialized between two allocations in
-                    // its own block.
-                    if matches!(
-                        inst.kind,
-                        InstKind::MLoad(addr)
-                            if func.value_u64(addr) == Some(EvmMemoryLayout::FMP_SLOT)
-                    ) {
-                        self.spill_value_if_needed(func, result);
-                    }
+                self.generate_block_inst(func_id, inst_id, func, liveness, block_id, inst_idx);
+                if self.physical_replay_stop == Some((block_id, inst_idx + 1)) {
+                    return;
                 }
             }
 
@@ -1943,6 +3578,43 @@ impl<'gcx> EvmCodegen<'gcx> {
         }
         self.function_stack_peaks.insert(func_id, peak);
         self.assign_ranked_spill_addrs(func_id);
+    }
+
+    /// Emits one non-phi instruction while preserving the ordinary block-emission invariants.
+    fn generate_block_inst(
+        &mut self,
+        func_id: FunctionId,
+        inst_id: InstId,
+        func: &Function,
+        liveness: &Liveness,
+        block_id: BlockId,
+        inst_idx: usize,
+    ) {
+        let inst = func.inst(inst_id);
+        let result_value = func.inst_result_value(inst_id);
+        self.generate_inst(
+            func_id,
+            inst_id,
+            func,
+            &inst.kind,
+            liveness,
+            block_id,
+            inst_idx,
+            result_value,
+        );
+        if let Some(result) = result_value {
+            self.spill_reserved_result_if_live(func, liveness, block_id, inst_idx, result);
+            // A free-memory-pointer load cannot be rematerialized once the pointer moves. Park
+            // every FMP load at its definition so later uses reload the original value — whether
+            // the definition crosses a block on a preserved edge or is re-materialized between
+            // two allocations in its own block.
+            if matches!(
+                inst.kind,
+                InstKind::MLoad(addr) if func.value_u64(addr) == Some(EvmMemoryLayout::FMP_SLOT)
+            ) {
+                self.spill_value_if_needed(func, result);
+            }
+        }
     }
 
     /// Returns the target of a stack-preservable jump: the block ends in

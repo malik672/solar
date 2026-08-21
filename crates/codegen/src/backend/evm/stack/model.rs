@@ -20,7 +20,7 @@ pub(crate) const MAX_STACK_DEPTH: usize = 1024;
 /// - Position 0 = top of stack
 /// - Position 1 = second from top
 /// - etc.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StackModel {
     /// The stack, with index 0 being the top.
     /// Each entry is either a known ValueId or None (for anonymous or successor-unused words).

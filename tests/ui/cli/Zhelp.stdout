@@ -69,6 +69,12 @@ Options:
       -Zswitch-max-bit-slice-gas-code-growth <SWITCH_MAX_BIT_SLICE_GAS_CODE_GROWTH>
           Override the per-switch bit-slice table growth limit for benchmarking
 
+      -Zevm-min-pressure-schedule
+          Use exact minimum-pressure instruction scheduling for small movable EVM MIR regions
+
+      -Zevm-physical-beam-schedule
+          Emit compact physical-beam schedules for small movable EVM MIR regions
+
       -Zhelp
           Print help
 

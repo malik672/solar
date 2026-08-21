@@ -10,14 +10,14 @@
 //! treated as uses at the phi instruction in the merge block, and the phi result is
 //! defined like any other instruction result.
 
-use crate::mir::{BlockId, Function, Terminator, Value, ValueId};
+use crate::mir::{BlockId, Function, InstId, Terminator, Value, ValueId};
 use smallvec::SmallVec;
 use solar_data_structures::{
     bit_set::{DenseBitSet, GrowableBitSet},
     index::{IndexVec, index_vec},
     map::FxHashMap,
 };
-use std::collections::VecDeque;
+use std::{collections::VecDeque, ops::Range};
 
 /// A dense bitset for tracking live values.
 pub(crate) type LiveSet = GrowableBitSet<ValueId>;
@@ -39,7 +39,7 @@ struct BlockLiveness {
 }
 
 /// Liveness analysis results for a function.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Liveness {
     /// Per-block liveness information (indexed by block index).
     block_liveness: IndexVec<BlockId, BlockLiveness>,
@@ -53,6 +53,65 @@ pub(crate) struct Liveness {
 }
 
 impl Liveness {
+    /// Recomputes instruction last-use positions after reordering one block.
+    ///
+    /// A legal within-block topological reorder does not change block defs, uses, successors, or
+    /// therefore live-in/live-out. The backend search can reuse that fixed-point solution and
+    /// update only the order-dependent portion of liveness.
+    pub(crate) fn recompute_block_last_uses(&mut self, func: &Function, block_id: BlockId) {
+        let instructions = &func.blocks[block_id].instructions;
+        self.recompute_block_last_uses_with_region(
+            func,
+            block_id,
+            0..instructions.len(),
+            instructions,
+        );
+    }
+
+    /// Recomputes instruction last-use positions after replacing one equal-length block region.
+    pub(crate) fn recompute_block_last_uses_with_region(
+        &mut self,
+        func: &Function,
+        block_id: BlockId,
+        range: Range<usize>,
+        replacement: &[InstId],
+    ) {
+        let block = &func.blocks[block_id];
+        debug_assert_eq!(range.len(), replacement.len());
+        let reordered = block.instructions[..range.start]
+            .iter()
+            .chain(replacement)
+            .chain(&block.instructions[range.end..])
+            .copied()
+            .collect::<SmallVec<[InstId; 16]>>();
+        self.recompute_block_last_uses_for_order(func, block_id, &reordered);
+    }
+
+    /// Recomputes instruction last-use positions for a complete replacement block order.
+    pub(crate) fn recompute_block_last_uses_for_order(
+        &mut self,
+        func: &Function,
+        block_id: BlockId,
+        instructions: &[InstId],
+    ) {
+        self.last_use_in_block.retain(|&(_, block), _| block != block_id);
+        let block = &func.blocks[block_id];
+        let mut operands = SmallVec::<[ValueId; 8]>::new();
+        if let Some(term) = &block.terminator {
+            collect_terminator_uses(term, &mut operands);
+            for &operand in &operands {
+                self.last_use_in_block.insert((operand, block_id), None);
+            }
+        }
+        for (inst_idx, &inst_id) in instructions.iter().enumerate().rev() {
+            operands.clear();
+            func.inst(inst_id).kind.collect_operands(&mut operands);
+            for &operand in &operands {
+                self.last_use_in_block.entry((operand, block_id)).or_insert(Some(inst_idx));
+            }
+        }
+    }
+
     /// Computes liveness for a function.
     #[must_use]
     pub(crate) fn compute(func: &Function) -> Self {

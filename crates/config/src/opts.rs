@@ -413,6 +413,14 @@ pub struct UnstableOpts {
     #[cfg_attr(feature = "clap", arg(long))]
     pub switch_max_bit_slice_gas_code_growth: Option<usize>,
 
+    /// Use exact minimum-pressure instruction scheduling for small movable EVM MIR regions.
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub evm_min_pressure_schedule: bool,
+
+    /// Emit compact physical-beam schedules for small movable EVM MIR regions.
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub evm_physical_beam_schedule: bool,
+
     // ----------------------------------------
     // Please add new options above this point!
     // ----------------------------------------
