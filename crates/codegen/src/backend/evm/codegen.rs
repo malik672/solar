@@ -2527,6 +2527,42 @@ impl<'gcx> EvmCodegen<'gcx> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn compact_physical_block_suffix_score(
+        &mut self,
+        state: &CompactPhysicalState,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        completion: &[InstId],
+        root: CompactPhysicalRoot,
+        score_root: &PhysicalReplayStart,
+        liveness: &mut Liveness,
+    ) -> PhysicalReplayScore {
+        self.restore_compact_physical_state(root, state);
+        liveness.recompute_block_last_uses_with_region(
+            func,
+            region.block,
+            region.range.clone(),
+            completion,
+        );
+        let suffix = &func.blocks[region.block].instructions[region.range.end..];
+        for (offset, &inst_id) in suffix.iter().enumerate() {
+            if matches!(func.inst(inst_id).kind, InstKind::Phi(_)) {
+                continue;
+            }
+            self.generate_block_inst(
+                func_id,
+                inst_id,
+                func,
+                liveness,
+                region.block,
+                region.range.end + offset,
+            );
+        }
+        score_root.score(self)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn compact_physical_lookahead(
         &mut self,
         state: &CompactPhysicalState,
@@ -3111,7 +3147,23 @@ impl<'gcx> EvmCodegen<'gcx> {
                 &mut backend_transactions,
             );
         }
-        let baseline = baseline.unwrap_or(current_state.score);
+        let (baseline, baseline_interface) = if let Some(baseline) = baseline {
+            (baseline, None)
+        } else {
+            let score = workspace.compact_physical_block_suffix_score(
+                &current_state,
+                func_id,
+                func,
+                region,
+                &schedules[0].0,
+                root,
+                &score_root,
+                &mut liveness,
+            );
+            let interface =
+                (workspace.scheduler.stack.as_slice().to_vec(), workspace.scheduler.spills.clone());
+            (score, Some(interface))
+        };
 
         for depth in 0..region.range.len() {
             let mut next = Vec::new();
@@ -3183,11 +3235,33 @@ impl<'gcx> EvmCodegen<'gcx> {
 
         let mut winner = None;
         for state in &beam {
-            let (_, _, terminal_score) = schedules
+            let (schedule, _, terminal_score) = schedules
                 .iter()
                 .find(|(schedule, _, _)| schedule == &state.prefix)
                 .expect("complete beam state must identify a legal schedule");
-            let score = terminal_score.unwrap_or(state.score);
+            let (score, continuation_safe) = if let Some(score) = terminal_score {
+                (*score, true)
+            } else {
+                let score = workspace.compact_physical_block_suffix_score(
+                    state,
+                    func_id,
+                    func,
+                    region,
+                    schedule,
+                    root,
+                    &score_root,
+                    &mut liveness,
+                );
+                let continuation_safe =
+                    baseline_interface.as_ref().is_none_or(|(baseline_stack, baseline_spills)| {
+                        workspace.scheduler.stack.as_slice() == baseline_stack
+                            && workspace.scheduler.spills == *baseline_spills
+                    });
+                (score, continuation_safe)
+            };
+            if !continuation_safe {
+                continue;
+            }
             if winner.as_ref().is_none_or(
                 |(_, winner_score): &(&CompactPhysicalState, PhysicalReplayScore)| {
                     score.key(optimization) < winner_score.key(optimization)
@@ -3252,9 +3326,10 @@ impl<'gcx> EvmCodegen<'gcx> {
         order
     }
 
-    /// Emits the ordinary function while collecting bounded physical choices, then emits at most
-    /// one combined candidate. The ordinary emission remains in place unless that candidate
-    /// improves it, so production needs only one pre-function clone and no region-prefix replay.
+    /// Runs one ordinary shadow emission to collect bounded physical choices, then emits the
+    /// combined candidate once. The completed shadow backend is retained when no candidate wins,
+    /// so production pays for at most two whole-function emissions rather than replaying every
+    /// region prefix and compiling the selected function a third time.
     fn try_emit_bounded_physical_schedules(
         &mut self,
         func_id: FunctionId,
@@ -3266,18 +3341,19 @@ impl<'gcx> EvmCodegen<'gcx> {
         }
 
         let score_root = PhysicalReplayStart::capture(&self.asm);
-        let mut candidate_backend = self.clone();
-        self.physical_replay_active = true;
-        self.physical_planning = Some(PhysicalPlanningState::new(candidates));
-        self.generate_function_body(func_id, func);
-        let baseline = score_root.score(self);
-        let planning = self
+        let mut baseline_backend = self.clone();
+        baseline_backend.physical_replay_active = true;
+        baseline_backend.physical_planning = Some(PhysicalPlanningState::new(candidates));
+        baseline_backend.generate_function_body(func_id, func);
+        let baseline = score_root.score(&baseline_backend);
+        let planning = baseline_backend
             .physical_planning
             .take()
             .expect("physical planning state must survive shadow emission");
-        self.physical_replay_active = false;
+        baseline_backend.physical_replay_active = false;
 
         if planning.choices.is_empty() {
+            *self = baseline_backend;
             return true;
         }
 
@@ -3287,6 +3363,7 @@ impl<'gcx> EvmCodegen<'gcx> {
                 .copy_from_slice(&choice.order);
         }
 
+        let mut candidate_backend = self.clone();
         candidate_backend.physical_replay_active = true;
         candidate_backend.generate_function_body(func_id, &scheduled);
         candidate_backend.physical_replay_active = false;
@@ -3297,11 +3374,13 @@ impl<'gcx> EvmCodegen<'gcx> {
             && candidate.spill_bytes <= baseline.spill_bytes;
         if dominates_baseline && candidate.key(optimization) < baseline.key(optimization) {
             *self = candidate_backend;
+        } else {
+            *self = baseline_backend;
         }
         true
     }
 
-    /// Evaluates one candidate group from the physical state reached by ordinary emission.
+    /// Evaluates one candidate group from the physical state reached by the shadow emission.
     fn plan_physical_region_from_current_state(
         &mut self,
         func_id: FunctionId,
@@ -3317,7 +3396,9 @@ impl<'gcx> EvmCodegen<'gcx> {
             return;
         };
 
-        if let Some(order) = self.run_compact_physical_beam_region(
+        let mut entry_backend = self.clone();
+        entry_backend.physical_planning = None;
+        if let Some(order) = self.audit_compact_physical_beam_region(
             func_id,
             func,
             &region,
@@ -3326,7 +3407,8 @@ impl<'gcx> EvmCodegen<'gcx> {
             None,
             self.gcx.sess.opts.optimization,
             None,
-            liveness.clone(),
+            Some(entry_backend),
+            Some(liveness.clone()),
         ) {
             self.physical_planning.as_mut().unwrap().choices.push(PhysicalScheduleChoice {
                 block,

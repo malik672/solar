@@ -9,7 +9,7 @@ use std::ops::Range;
 
 const TARGET: &str = "solar_codegen::evm_inst_schedule::pressure_oracle";
 const MAX_INSTRUCTIONS: usize = 16;
-const MAX_PHYSICAL_CANDIDATES_PER_REGION: usize = 2;
+const MAX_PHYSICAL_CANDIDATES_PER_REGION: usize = 6;
 const MAX_EXHAUSTIVE_INSTRUCTIONS: usize = 8;
 const MAX_TOPOLOGICAL_ORDERS: usize = 10_000;
 type LiveSet = GrowableBitSet<ValueId>;
@@ -80,12 +80,6 @@ fn physical_schedule_candidates_with_mode(
                 if let Some(optimal) = problem.solve_exact()
                     && let Some(current) = problem.score_order(instructions)
                 {
-                    if !exhaustive_small_regions
-                        && (optimal.cost.peak, optimal.cost.area) >= (current.peak, current.area)
-                    {
-                        start = end + usize::from(end < block.instructions.len());
-                        continue;
-                    }
                     let (orders, exhaustive) = if exhaustive_small_regions
                         && instructions.len() <= MAX_EXHAUSTIVE_INSTRUCTIONS
                     {
