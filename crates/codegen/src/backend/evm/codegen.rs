@@ -9,8 +9,8 @@
 use super::{
     EVM_WORD_BYTES,
     assembler::{
-        ArtifactKind, Assembler, DeferredAlloc, DeferredConst, ImmutableRef, Label,
-        PreparedAssembly,
+        ArtifactKind, Assembler, AssemblerCheckpoint, DeferredAlloc, DeferredConst, ImmutableRef,
+        Label, PreparedAssembly,
     },
     ir,
     layout::{RelayoutAddress, preserves_push_width},
@@ -40,7 +40,7 @@ use crate::{
         physical_schedule_candidates,
     },
 };
-use alloy_primitives::U256;
+use alloy_primitives::{Bytes, U256};
 use smallvec::SmallVec;
 use solar_config::OptimizationMode;
 use solar_data_structures::{
@@ -184,10 +184,38 @@ impl PhysicalReplayScore {
             ),
         }
     }
+
+    /// Appends a continuation measured from another prefix with the same physical interface.
+    fn append_continuation(self, entry: Self, exit: Self) -> Self {
+        macro_rules! append_delta {
+            ($field:ident) => {
+                self.$field.saturating_add(exit.$field.saturating_sub(entry.$field))
+            };
+        }
+        Self {
+            instructions: append_delta!(instructions),
+            terminators: append_delta!(terminators),
+            estimated_bytes: append_delta!(estimated_bytes),
+            estimated_static_gas: append_delta!(estimated_static_gas),
+            encoded_pushes: append_delta!(encoded_pushes),
+            dups: append_delta!(dups),
+            swaps: append_delta!(swaps),
+            pops: append_delta!(pops),
+            mloads: append_delta!(mloads),
+            mstores: append_delta!(mstores),
+            spill_bytes: exit.spill_bytes,
+            // The cache representative has no greater prefix peak than a state that reuses it.
+            // If the continuation raised that peak, `exit` records it; otherwise `self` already
+            // dominates every depth reached by the shared continuation.
+            peak_stack: self.peak_stack.max(exit.peak_stack),
+        }
+    }
 }
 
 const PHYSICAL_LOOKAHEAD_DEPTHS: [usize; 1] = [2];
 const PHYSICAL_STRATIFIED_SLACK_WIDTHS: [usize; 1] = [2];
+// Maximum continuation window used to score physical candidates.
+const PHYSICAL_REJOIN_SUFFIX_LIMIT: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 struct PhysicalBeamResult {
@@ -204,18 +232,10 @@ struct PhysicalBeamResult {
     winner: PhysicalReplayScore,
 }
 
-#[derive(Clone, Debug)]
-struct PhysicalScheduleChoice {
-    block: BlockId,
-    range: std::ops::Range<usize>,
-    order: Vec<InstId>,
-}
-
 #[derive(Clone, Debug, Default)]
 struct PhysicalPlanningState {
     candidates: Vec<PhysicalScheduleCandidate>,
     groups: FxHashMap<(BlockId, usize), (usize, usize)>,
-    choices: Vec<PhysicalScheduleChoice>,
 }
 
 impl PhysicalPlanningState {
@@ -234,7 +254,7 @@ impl PhysicalPlanningState {
             groups.insert((candidate.block, candidate.range.start), (start, end));
             start = end;
         }
-        Self { candidates, groups, choices: Vec::new() }
+        Self { candidates, groups }
     }
 }
 
@@ -251,11 +271,14 @@ struct CompactPhysicalState {
     prefix: Vec<InstId>,
     scheduler: StackScheduler,
     spill_addr_consts: FxHashMap<u64, (DeferredConst, usize)>,
+    pending_frame_size_consts: Vec<(DeferredConst, FunctionId)>,
+    internal_call_stack_edges: Vec<InternalCallStackEdge>,
+    static_frame_addr_consts: FxHashMap<(FunctionId, u64), (DeferredConst, usize)>,
+    pending_static_allocs: FxHashMap<FunctionId, Vec<(DeferredAlloc, u64)>>,
+    assembler: AssemblerCheckpoint,
     instructions: Vec<ir::Instruction>,
-    label_relocations: Vec<(ir::BlockId, usize, Label)>,
-    deferred_relocations: Vec<(ir::BlockId, usize, DeferredConst)>,
-    indexed_jump_relocations: Vec<(ir::BlockId, Vec<Label>)>,
-    alloc_relocations: Vec<(ir::BlockId, usize, DeferredAlloc)>,
+    blocks: Vec<ir::Block>,
+    data: Vec<Bytes>,
     score: PhysicalReplayScore,
     pressure: usize,
 }
@@ -264,10 +287,8 @@ struct CompactPhysicalState {
 struct CompactPhysicalRoot {
     block: ir::BlockId,
     instructions: usize,
-    label_relocations: usize,
-    deferred_relocations: usize,
-    indexed_jump_relocations: usize,
-    alloc_relocations: usize,
+    blocks: usize,
+    data: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -961,11 +982,11 @@ pub struct EvmCodegen<'gcx> {
     switch_gas_code_growth_remaining: usize,
     capture_mir: bool,
     capture_evm_ir: bool,
-    /// Prevents analysis-only shadow emission from recursively starting another replay.
+    /// Prevents transactional physical emission from recursively starting another transaction.
     physical_replay_active: bool,
-    /// Stops an analysis-only replay after this many instructions in one MIR block.
+    /// Stops a bounded transaction after this many instructions in one MIR block.
     physical_replay_stop: Option<(BlockId, usize)>,
-    /// Bounded physical choices collected during one ordinary shadow emission.
+    /// Bounded physical regions available during transactional emission.
     physical_planning: Option<PhysicalPlanningState>,
 }
 
@@ -2118,7 +2139,7 @@ impl<'gcx> EvmCodegen<'gcx> {
                     );
                     expected
                 });
-                if let Some(order) = self.audit_compact_physical_beam_region(
+                if let Some((order, _)) = self.audit_compact_physical_beam_region(
                     func_id,
                     func,
                     candidate,
@@ -2211,7 +2232,7 @@ impl<'gcx> EvmCodegen<'gcx> {
             {
                 end += 1;
             }
-            if let Some(order) = self.audit_compact_physical_beam_region(
+            if let Some((order, _)) = self.audit_compact_physical_beam_region(
                 func_id,
                 func,
                 candidate,
@@ -2419,10 +2440,8 @@ impl<'gcx> EvmCodegen<'gcx> {
         CompactPhysicalRoot {
             block,
             instructions: self.asm.program.blocks[block].instructions.len(),
-            label_relocations: self.asm.label_relocations.len(),
-            deferred_relocations: self.asm.deferred_relocations.len(),
-            indexed_jump_relocations: self.asm.indexed_jump_relocations.len(),
-            alloc_relocations: self.asm.alloc_relocations.len(),
+            blocks: self.asm.program.blocks.len(),
+            data: self.asm.program.data.len(),
         }
     }
 
@@ -2437,15 +2456,15 @@ impl<'gcx> EvmCodegen<'gcx> {
             prefix,
             scheduler: self.scheduler.clone(),
             spill_addr_consts: self.spill_addr_consts.clone(),
+            pending_frame_size_consts: self.pending_frame_size_consts.clone(),
+            internal_call_stack_edges: self.internal_call_stack_edges.clone(),
+            static_frame_addr_consts: self.static_frame_addr_consts.clone(),
+            pending_static_allocs: self.pending_static_allocs.clone(),
+            assembler: self.asm.checkpoint(),
             instructions: self.asm.program.blocks[root.block].instructions[root.instructions..]
                 .to_vec(),
-            label_relocations: self.asm.label_relocations[root.label_relocations..].to_vec(),
-            deferred_relocations: self.asm.deferred_relocations[root.deferred_relocations..]
-                .to_vec(),
-            indexed_jump_relocations: self.asm.indexed_jump_relocations
-                [root.indexed_jump_relocations..]
-                .to_vec(),
-            alloc_relocations: self.asm.alloc_relocations[root.alloc_relocations..].to_vec(),
+            blocks: self.asm.program.blocks.raw[root.blocks..].to_vec(),
+            data: self.asm.program.data.raw[root.data..].to_vec(),
             score: score_root.score(self),
             pressure,
         }
@@ -2458,17 +2477,18 @@ impl<'gcx> EvmCodegen<'gcx> {
     ) {
         self.scheduler.clone_from(&state.scheduler);
         self.spill_addr_consts.clone_from(&state.spill_addr_consts);
+        self.pending_frame_size_consts.clone_from(&state.pending_frame_size_consts);
+        self.internal_call_stack_edges.clone_from(&state.internal_call_stack_edges);
+        self.static_frame_addr_consts.clone_from(&state.static_frame_addr_consts);
+        self.pending_static_allocs.clone_from(&state.pending_static_allocs);
+        self.asm.restore_checkpoint(&state.assembler);
         let instructions = &mut self.asm.program.blocks[root.block].instructions;
         instructions.truncate(root.instructions);
         instructions.extend_from_slice(&state.instructions);
-        self.asm.label_relocations.truncate(root.label_relocations);
-        self.asm.label_relocations.extend_from_slice(&state.label_relocations);
-        self.asm.deferred_relocations.truncate(root.deferred_relocations);
-        self.asm.deferred_relocations.extend_from_slice(&state.deferred_relocations);
-        self.asm.indexed_jump_relocations.truncate(root.indexed_jump_relocations);
-        self.asm.indexed_jump_relocations.extend_from_slice(&state.indexed_jump_relocations);
-        self.asm.alloc_relocations.truncate(root.alloc_relocations);
-        self.asm.alloc_relocations.extend_from_slice(&state.alloc_relocations);
+        self.asm.program.blocks.raw.truncate(root.blocks);
+        self.asm.program.blocks.raw.extend_from_slice(&state.blocks);
+        self.asm.program.data.raw.truncate(root.data);
+        self.asm.program.data.raw.extend_from_slice(&state.data);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2496,6 +2516,39 @@ impl<'gcx> EvmCodegen<'gcx> {
         let mut prefix = parent.prefix.clone();
         prefix.push(next);
         self.capture_compact_physical_state(root, score_root, prefix, parent.pressure)
+    }
+
+    /// Evaluates one already-bounded complete schedule with a single state transaction.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_compact_physical_schedule(
+        &mut self,
+        entry: &CompactPhysicalState,
+        func_id: FunctionId,
+        func: &Function,
+        region: &PhysicalScheduleCandidate,
+        schedule: &[InstId],
+        root: CompactPhysicalRoot,
+        score_root: &PhysicalReplayStart,
+        liveness: &mut Liveness,
+    ) -> CompactPhysicalState {
+        self.restore_compact_physical_state(root, entry);
+        liveness.recompute_block_last_uses_with_region(
+            func,
+            region.block,
+            region.range.clone(),
+            schedule,
+        );
+        for (offset, &instruction) in schedule.iter().enumerate() {
+            self.generate_block_inst(
+                func_id,
+                instruction,
+                func,
+                liveness,
+                region.block,
+                region.range.start + offset,
+            );
+        }
+        self.capture_compact_physical_state(root, score_root, schedule.to_vec(), entry.pressure)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2545,8 +2598,10 @@ impl<'gcx> EvmCodegen<'gcx> {
             region.range.clone(),
             completion,
         );
-        let suffix = &func.blocks[region.block].instructions[region.range.end..];
-        for (offset, &inst_id) in suffix.iter().enumerate() {
+        let suffix = func.blocks[region.block].instructions[region.range.end..]
+            .iter()
+            .take(PHYSICAL_REJOIN_SUFFIX_LIMIT);
+        for (offset, &inst_id) in suffix.enumerate() {
             if matches!(func.inst(inst_id).kind, InstKind::Phi(_)) {
                 continue;
             }
@@ -3070,7 +3125,7 @@ impl<'gcx> EvmCodegen<'gcx> {
         expected: Option<PhysicalReplayScore>,
         entry_backend: Option<Self>,
         entry_liveness: Option<Liveness>,
-    ) -> Option<Vec<InstId>> {
+    ) -> Option<(Vec<InstId>, CompactPhysicalState)> {
         let liveness = entry_liveness.unwrap_or_else(|| {
             self.emitting_entry
                 .then(|| Liveness::compute_block_local_for_codegen(func))
@@ -3106,7 +3161,7 @@ impl<'gcx> EvmCodegen<'gcx> {
         optimization: OptimizationMode,
         expected: Option<PhysicalReplayScore>,
         mut liveness: Liveness,
-    ) -> Option<Vec<InstId>> {
+    ) -> Option<(Vec<InstId>, CompactPhysicalState)> {
         let workspace = self;
         let current = func.blocks[region.block].instructions[region.range.clone()].to_vec();
         let mut schedules = Vec::with_capacity(candidates.len() + 1);
@@ -3117,36 +3172,55 @@ impl<'gcx> EvmCodegen<'gcx> {
         let minimum_pressure = schedules.iter().map(|(_, pressure, _)| *pressure).min().unwrap();
         schedules.retain(|(_, pressure, _)| *pressure <= minimum_pressure + 1);
 
+        let direct_candidates = scores.is_none() && expected.is_none();
+        let transaction_census = direct_candidates
+            && tracing::enabled!(target: PHYSICAL_REPLAY_TARGET, tracing::Level::DEBUG);
         let started = Instant::now();
         let score_root = PhysicalReplayStart::capture(&workspace.asm);
         let root = workspace.compact_physical_root();
+        let snapshot_started = transaction_census.then(Instant::now);
         let root_state = workspace.capture_compact_physical_state(
             root,
             &score_root,
             Vec::new(),
             minimum_pressure,
         );
-        let mut current_state = root_state.clone();
-        let mut beam = vec![root_state.clone()];
+        let snapshot_micros = snapshot_started.map_or(0, |started| started.elapsed().as_micros());
         let mut states_expanded = 0;
         let mut backend_transactions = 1;
         let mut transaction_cache = FxHashMap::default();
 
-        for &instruction in &schedules[0].0 {
-            current_state = workspace.cached_compact_physical_child(
-                &current_state,
+        let current_state = if direct_candidates {
+            backend_transactions += 1;
+            workspace.advance_compact_physical_schedule(
+                &root_state,
                 func_id,
                 func,
                 region,
-                instruction,
                 &schedules[0].0,
                 root,
                 &score_root,
                 &mut liveness,
-                &mut transaction_cache,
-                &mut backend_transactions,
-            );
-        }
+            )
+        } else {
+            let mut state = root_state.clone();
+            for &instruction in &schedules[0].0 {
+                state = workspace.cached_compact_physical_child(
+                    &state,
+                    func_id,
+                    func,
+                    region,
+                    instruction,
+                    &schedules[0].0,
+                    root,
+                    &score_root,
+                    &mut liveness,
+                    &mut transaction_cache,
+                    &mut backend_transactions,
+                );
+            }
+            state
+        };
         let (baseline, baseline_interface) = if let Some(baseline) = baseline {
             (baseline, None)
         } else {
@@ -3164,6 +3238,178 @@ impl<'gcx> EvmCodegen<'gcx> {
                 (workspace.scheduler.stack.as_slice().to_vec(), workspace.scheduler.spills.clone());
             (score, Some(interface))
         };
+
+        // Production receives a deliberately tiny, already-bounded schedule family. Evaluate
+        // that finite family exactly through the shared prefix cache instead of running another
+        // beam search over it. The beam remains useful for the exhaustive research path below,
+        // where `scores` supplies the reference frontier.
+        if direct_candidates {
+            let baseline_region_stack = current_state.scheduler.stack.as_slice().to_vec();
+            let baseline_region_spills = current_state.scheduler.spills.clone();
+            let mut winner = (current_state, baseline);
+            let baseline_final_stack = workspace.scheduler.stack.as_slice().to_vec();
+            let baseline_final_spills = workspace.scheduler.spills.clone();
+            let mut suffix_cache = vec![(
+                winner.0.scheduler.stack.as_slice().to_vec(),
+                winner.0.scheduler.spills.clone(),
+                winner.0.score,
+                baseline,
+                baseline_final_stack,
+                baseline_final_spills,
+            )];
+            let mut suffix_replays = 1;
+            let mut candidate_emit_micros = 0;
+            let mut suffix_micros = 0;
+            let mut rejoin_micros = 0;
+            let mut reject_rejoin_stack = 0;
+            let mut reject_rejoin_recovery = 0;
+            let mut reject_continuation = 0;
+            let mut candidates_rejoined = 0;
+            for (schedule, _, terminal_score) in &schedules[1..] {
+                backend_transactions += 1;
+                states_expanded += schedule.len();
+                let candidate_started = transaction_census.then(Instant::now);
+                let state = workspace.advance_compact_physical_schedule(
+                    &root_state,
+                    func_id,
+                    func,
+                    region,
+                    schedule,
+                    root,
+                    &score_root,
+                    &mut liveness,
+                );
+                candidate_emit_micros +=
+                    candidate_started.map_or(0, |started| started.elapsed().as_micros());
+                // Online commitment may not expose a transient physical representation to the
+                // ordinary emitter. A bounded later rejoin is sufficient for analysis, but
+                // backend metadata generated between the region and that rejoin can observe the
+                // intermediate layout. Commit only an exact region-exit interface here.
+                let rejoin_started = transaction_census.then(Instant::now);
+                let stack_rejoins = state.scheduler.stack.as_slice() == baseline_region_stack;
+                let recovery_rejoins = state.scheduler.spills == baseline_region_spills;
+                rejoin_micros += rejoin_started.map_or(0, |started| started.elapsed().as_micros());
+                if !stack_rejoins || !recovery_rejoins {
+                    reject_rejoin_stack += usize::from(!stack_rejoins);
+                    reject_rejoin_recovery += usize::from(!recovery_rejoins);
+                    continue;
+                }
+                candidates_rejoined += 1;
+                let (score, continuation_safe) = if let Some(score) = terminal_score {
+                    (*score, true)
+                } else if let Some((_, _, entry_score, exit_score, exit_stack, exit_spills)) =
+                    suffix_cache.iter().find(|(stack, spills, entry_score, ..)| {
+                        state.scheduler.stack.as_slice() == stack
+                            && state.scheduler.spills == *spills
+                            && state.score.peak_stack >= entry_score.peak_stack
+                    })
+                {
+                    (
+                        state.score.append_continuation(*entry_score, *exit_score),
+                        baseline_interface.as_ref().is_none_or(
+                            |(baseline_stack, baseline_spills)| {
+                                exit_stack == baseline_stack && *exit_spills == *baseline_spills
+                            },
+                        ),
+                    )
+                } else {
+                    let suffix_started = transaction_census.then(Instant::now);
+                    let score = workspace.compact_physical_block_suffix_score(
+                        &state,
+                        func_id,
+                        func,
+                        region,
+                        schedule,
+                        root,
+                        &score_root,
+                        &mut liveness,
+                    );
+                    suffix_micros +=
+                        suffix_started.map_or(0, |started| started.elapsed().as_micros());
+                    suffix_replays += 1;
+                    let continuation_safe = baseline_interface.as_ref().is_none_or(
+                        |(baseline_stack, baseline_spills)| {
+                            workspace.scheduler.stack.as_slice() == baseline_stack
+                                && workspace.scheduler.spills == *baseline_spills
+                        },
+                    );
+                    suffix_cache.push((
+                        state.scheduler.stack.as_slice().to_vec(),
+                        state.scheduler.spills.clone(),
+                        state.score,
+                        score,
+                        workspace.scheduler.stack.as_slice().to_vec(),
+                        workspace.scheduler.spills.clone(),
+                    ));
+                    (score, continuation_safe)
+                };
+                reject_continuation += usize::from(!continuation_safe);
+                if continuation_safe && score.key(optimization) < winner.1.key(optimization) {
+                    winner = (state, score);
+                }
+            }
+
+            let (winner, candidate_score) = winner;
+            tracing::debug!(
+                target: PHYSICAL_REPLAY_TARGET,
+                function = %func.name,
+                block = region.block.index(),
+                range_start = region.range.start,
+                range_end = region.range.end,
+                schedules = schedules.len(),
+                terminal_interfaces = suffix_cache.len(),
+                suffix_replays,
+                baseline_dups = baseline.dups,
+                baseline_swaps = baseline.swaps,
+                baseline_pops = baseline.pops,
+                baseline_mloads = baseline.mloads,
+                baseline_mstores = baseline.mstores,
+                states_expanded,
+                backend_transactions,
+                snapshot_micros,
+                candidate_emit_micros,
+                suffix_micros,
+                rejoin_micros,
+                reject_rejoin_stack,
+                reject_rejoin_recovery,
+                reject_continuation,
+                elapsed_micros = started.elapsed().as_micros(),
+                candidate_beats_dfs = candidate_score.key(optimization) < baseline.key(optimization),
+                "exact compact physical candidate result"
+            );
+            let dominates_baseline = candidate_score.estimated_static_gas
+                <= baseline.estimated_static_gas
+                && candidate_score.estimated_bytes <= baseline.estimated_bytes
+                && candidate_score.spill_bytes <= baseline.spill_bytes;
+            let result = (dominates_baseline
+                && candidate_score.key(optimization) < baseline.key(optimization))
+            .then(|| (winner.prefix.clone(), winner.clone()));
+            let restore_started = transaction_census.then(Instant::now);
+            workspace.restore_compact_physical_state(root, &root_state);
+            tracing::debug!(
+                target: PHYSICAL_REPLAY_TARGET,
+                function = %func.name,
+                block = region.block.index(),
+                range_start = region.range.start,
+                range_end = region.range.end,
+                candidates = schedules.len() - 1,
+                accepted = result.is_some(),
+                reject_no_improvement = usize::from(result.is_none() && candidates_rejoined > 0),
+                candidates_rejoined,
+                reject_rejoin_stack,
+                reject_rejoin_recovery,
+                reject_continuation,
+                snapshot_micros,
+                restore_micros = restore_started.map_or(0, |started| started.elapsed().as_micros()),
+                candidate_emit_micros,
+                suffix_micros,
+                rejoin_micros,
+                "transactional physical region census"
+            );
+            return result;
+        }
+
+        let mut beam = vec![root_state.clone()];
 
         for depth in 0..region.range.len() {
             let mut next = Vec::new();
@@ -3296,6 +3542,10 @@ impl<'gcx> EvmCodegen<'gcx> {
                 .get(region.range.end)
                 .map(|&inst| &func.inst(inst).kind),
             suffix_len = func.blocks[region.block].instructions.len() - region.range.end,
+            current_pressure = region.current_peak,
+            minimum_pressure,
+            entry_stack_depth = root_state.scheduler.stack.depth(),
+            schedules = schedules.len(),
             states_expanded,
             backend_transactions,
             elapsed_micros = started.elapsed().as_micros(),
@@ -3319,68 +3569,41 @@ impl<'gcx> EvmCodegen<'gcx> {
         let dominates_baseline = beam_score.estimated_static_gas <= baseline.estimated_static_gas
             && beam_score.estimated_bytes <= baseline.estimated_bytes
             && beam_score.spill_bytes <= baseline.spill_bytes;
-        let order = (dominates_baseline
+        let result = (dominates_baseline
             && beam_score.key(optimization) < baseline.key(optimization))
-        .then(|| winner.prefix.clone());
+        .then(|| (winner.prefix.clone(), winner.clone()));
         workspace.restore_compact_physical_state(root, &root_state);
-        order
+        result
     }
 
-    /// Runs one ordinary shadow emission to collect bounded physical choices, then emits the
-    /// combined candidate once. The completed shadow backend is retained when no candidate wins,
-    /// so production pays for at most two whole-function emissions rather than replaying every
-    /// region prefix and compiling the selected function a third time.
+    /// Emits one function while committing bounded physical winners at their real entry states.
     fn try_emit_bounded_physical_schedules(
         &mut self,
         func_id: FunctionId,
         func: &Function,
     ) -> bool {
+        let candidates_started = Instant::now();
         let candidates = bounded_physical_schedule_candidates(func, EvmInstSchedule::is_movable);
+        tracing::debug!(
+            target: PHYSICAL_REPLAY_TARGET,
+            function = %func.name,
+            candidates = candidates.len(),
+            elapsed_micros = candidates_started.elapsed().as_micros(),
+            "bounded physical candidate generation"
+        );
         if candidates.is_empty() {
             return false;
         }
 
-        let score_root = PhysicalReplayStart::capture(&self.asm);
-        let mut baseline_backend = self.clone();
-        baseline_backend.physical_replay_active = true;
-        baseline_backend.physical_planning = Some(PhysicalPlanningState::new(candidates));
-        baseline_backend.generate_function_body(func_id, func);
-        let baseline = score_root.score(&baseline_backend);
-        let planning = baseline_backend
-            .physical_planning
-            .take()
-            .expect("physical planning state must survive shadow emission");
-        baseline_backend.physical_replay_active = false;
-
-        if planning.choices.is_empty() {
-            *self = baseline_backend;
-            return true;
-        }
-
-        let mut scheduled = func.clone();
-        for choice in planning.choices {
-            scheduled.blocks[choice.block].instructions[choice.range]
-                .copy_from_slice(&choice.order);
-        }
-
-        let mut candidate_backend = self.clone();
-        candidate_backend.physical_replay_active = true;
-        candidate_backend.generate_function_body(func_id, &scheduled);
-        candidate_backend.physical_replay_active = false;
-        let candidate = score_root.score(&candidate_backend);
-        let optimization = self.gcx.sess.opts.optimization;
-        let dominates_baseline = candidate.estimated_static_gas <= baseline.estimated_static_gas
-            && candidate.estimated_bytes <= baseline.estimated_bytes
-            && candidate.spill_bytes <= baseline.spill_bytes;
-        if dominates_baseline && candidate.key(optimization) < baseline.key(optimization) {
-            *self = candidate_backend;
-        } else {
-            *self = baseline_backend;
-        }
+        self.physical_replay_active = true;
+        self.physical_planning = Some(PhysicalPlanningState::new(candidates));
+        self.generate_function_body(func_id, func);
+        self.physical_planning = None;
+        self.physical_replay_active = false;
         true
     }
 
-    /// Evaluates one candidate group from the physical state reached by the shadow emission.
+    /// Evaluates and commits one candidate group from the current physical state.
     fn plan_physical_region_from_current_state(
         &mut self,
         func_id: FunctionId,
@@ -3388,17 +3611,15 @@ impl<'gcx> EvmCodegen<'gcx> {
         liveness: &Liveness,
         block: BlockId,
         inst_idx: usize,
-    ) {
-        let Some((region, candidates)) = self.physical_planning.as_ref().and_then(|planning| {
+    ) -> Option<usize> {
+        let (region, candidates) = self.physical_planning.as_ref().and_then(|planning| {
             let &(start, end) = planning.groups.get(&(block, inst_idx))?;
             Some((planning.candidates[start].clone(), planning.candidates[start..end].to_vec()))
-        }) else {
-            return;
-        };
+        })?;
 
-        let mut entry_backend = self.clone();
-        entry_backend.physical_planning = None;
-        if let Some(order) = self.audit_compact_physical_beam_region(
+        let root = self.compact_physical_root();
+        let planning = self.physical_planning.take().unwrap();
+        let result = self.run_compact_physical_beam_region(
             func_id,
             func,
             &region,
@@ -3407,14 +3628,14 @@ impl<'gcx> EvmCodegen<'gcx> {
             None,
             self.gcx.sess.opts.optimization,
             None,
-            Some(entry_backend),
-            Some(liveness.clone()),
-        ) {
-            self.physical_planning.as_mut().unwrap().choices.push(PhysicalScheduleChoice {
-                block,
-                range: region.range,
-                order,
-            });
+            liveness.clone(),
+        );
+        self.physical_planning = Some(planning);
+        if let Some((_, winner)) = result {
+            self.restore_compact_physical_state(root, &winner);
+            Some(region.range.end)
+        } else {
+            None
         }
     }
 
@@ -3535,22 +3756,27 @@ impl<'gcx> EvmCodegen<'gcx> {
                 self.set_stack_to_values(&plan.values().collect::<Vec<_>>());
             }
 
-            // Generate instructions
-            for (inst_idx, &inst_id) in block.instructions.iter().enumerate() {
+            // Generate instructions. A physical transaction may commit an entire region at once.
+            let mut inst_idx = 0;
+            while inst_idx < block.instructions.len() {
                 if self.physical_replay_stop == Some((block_id, inst_idx)) {
                     return;
                 }
-                if self.physical_planning.is_some() {
-                    self.plan_physical_region_from_current_state(
+                if self.physical_planning.is_some()
+                    && let Some(next) = self.plan_physical_region_from_current_state(
                         func_id, func, liveness, block_id, inst_idx,
-                    );
-                }
-                // Skip phi instructions (they're handled by copies)
-                if matches!(func.inst(inst_id).kind, InstKind::Phi(_)) {
+                    )
+                {
+                    inst_idx = next;
                     continue;
                 }
-                self.generate_block_inst(func_id, inst_id, func, liveness, block_id, inst_idx);
-                if self.physical_replay_stop == Some((block_id, inst_idx + 1)) {
+                let inst_id = block.instructions[inst_idx];
+                // Skip phi instructions (they're handled by copies)
+                if !matches!(func.inst(inst_id).kind, InstKind::Phi(_)) {
+                    self.generate_block_inst(func_id, inst_id, func, liveness, block_id, inst_idx);
+                }
+                inst_idx += 1;
+                if self.physical_replay_stop == Some((block_id, inst_idx)) {
                     return;
                 }
             }

@@ -982,6 +982,12 @@ impl StackScheduler {
     }
 
     /// Builds the only possible optimal plan when every distinct operand must be materialized.
+    ///
+    /// A preserved operand may already have an inaccessible stack occurrence: direct
+    /// materialization consumes a new copy while leaving that occurrence intact. Requiring every
+    /// occurrence to be below `SWAP16` reach proves that no stack action can produce the required
+    /// copy, while non-preserved operands must be absent because their old occurrences may not
+    /// survive below the operand head.
     fn try_direct_materialization_operand_plan(
         &self,
         operands: &[ValueId],
@@ -990,16 +996,22 @@ impl StackScheduler {
         evm_version: EvmVersion,
         cost_model: OperandCostModel,
     ) -> Option<OperandPlan> {
-        if !preserved.is_empty()
-            || operands.len() < 2
+        if operands.len() < 2
             || operands.iter().enumerate().any(|(i, &value)| operands[i + 1..].contains(&value))
-            || self
-                .stack
-                .as_slice()
-                .iter()
-                .any(|slot| slot.is_some_and(|value| operands.contains(&value)))
         {
             return None;
+        }
+
+        let stack = self.stack.as_slice();
+        for &value in operands {
+            if preserved.contains(&value) {
+                let depth = stack.iter().position(|&slot| slot == Some(value))?;
+                if depth <= MAX_STACK_ACCESS {
+                    return None;
+                }
+            } else if stack.contains(&Some(value)) {
+                return None;
+            }
         }
 
         let mut actions = PlannedActions::new();
@@ -1100,7 +1112,13 @@ impl StackScheduler {
         Some(OperandPlan { actions, cost })
     }
 
-    /// Builds the optimal two-action plan for a preserved top-of-stack binary operand.
+    /// Builds the optimal plan for one preserved resident binary operand and one value that must
+    /// be materialized.
+    ///
+    /// Below `DUP16` reach, two actions meet the lower bound of producing one operand copy and
+    /// materializing the other. At the `DUP16`/`SWAP16` boundary, the extra swap or duplicate is
+    /// forced by accessibility. A direct rematerialization candidate is preferred only when it is
+    /// strictly cheaper, preserving the established resident-plan tie-breaking.
     fn try_preserved_resident_binary_plan(
         &self,
         operands: &[ValueId],
@@ -1112,51 +1130,82 @@ impl StackScheduler {
     ) -> Option<OperandPlan> {
         let &[first, second] = operands else { return None };
         let &[preserved] = preserved else { return None };
-        let Some(&Some(resident)) = self.stack.as_slice().first() else {
-            return None;
-        };
-        if preserved != resident || first == second {
+        if first == second || (preserved != first && preserved != second) {
             return None;
         }
-
-        let other = if first == resident {
-            second
-        } else if second == resident {
-            first
-        } else {
-            return None;
-        };
-        if self.stack.as_slice()[1..].contains(&Some(other))
-            || self.stack.as_slice()[1..].contains(&Some(resident))
+        let resident = preserved;
+        let other = if first == resident { second } else { first };
+        let stack = self.stack.as_slice();
+        let depth = stack.iter().position(|&slot| slot == Some(resident))?;
+        if depth > MAX_STACK_ACCESS
+            || stack[depth + 1..].contains(&Some(resident))
+            || stack.contains(&Some(other))
         {
             return None;
         }
-        let materialize = self.materialize_operand(other, func)?;
-        let duplicate = ScheduledOp::Stack(StackOp::Dup(if first == resident { 1 } else { 2 }));
-        let resident_op = self
-            .materialize_operand(resident, func)
-            .filter(|resident_op| {
-                let materialize_cost =
-                    ScheduleCost::default().with_op(resident_op, evm_version, cost_model);
-                let duplicate_cost =
-                    ScheduleCost::default().with_op(&duplicate, evm_version, cost_model);
-                materialize_cost.cmp_for(duplicate_cost, optimization).is_lt()
-            })
-            .unwrap_or(duplicate);
-        let resident_pushed = (!matches!(&resident_op, ScheduledOp::Stack(_))).then_some(resident);
-        let ops = if first == resident {
-            [(resident_op, resident_pushed), (materialize, Some(other))]
+        let materialize_other = self.materialize_operand(other, func)?;
+
+        let stack_ops = if first == resident {
+            if depth < MAX_STACK_ACCESS {
+                smallvec::smallvec![
+                    (ScheduledOp::Stack(StackOp::Dup((depth + 1) as u8)), Some(resident)),
+                    (materialize_other.clone(), Some(other)),
+                ]
+            } else {
+                smallvec::smallvec![
+                    (ScheduledOp::Stack(StackOp::Swap(MAX_STACK_ACCESS as u8)), None),
+                    (ScheduledOp::Stack(StackOp::Dup(1)), Some(resident)),
+                    (materialize_other.clone(), Some(other)),
+                ]
+            }
+        } else if depth + 1 < MAX_STACK_ACCESS {
+            smallvec::smallvec![
+                (materialize_other.clone(), Some(other)),
+                (ScheduledOp::Stack(StackOp::Dup((depth + 2) as u8)), Some(resident)),
+            ]
+        } else if depth < MAX_STACK_ACCESS {
+            smallvec::smallvec![
+                (ScheduledOp::Stack(StackOp::Dup((depth + 1) as u8)), Some(resident)),
+                (materialize_other.clone(), Some(other)),
+                (ScheduledOp::Stack(StackOp::Swap(1)), None),
+            ]
         } else {
-            [(materialize, Some(other)), (resident_op, resident_pushed)]
+            smallvec::smallvec![
+                (ScheduledOp::Stack(StackOp::Swap(MAX_STACK_ACCESS as u8)), None),
+                (materialize_other.clone(), Some(other)),
+                (ScheduledOp::Stack(StackOp::Dup(2)), Some(resident)),
+            ]
         };
 
-        let mut actions = PlannedActions::new();
-        let mut cost = ScheduleCost::default();
-        for (op, pushed) in ops {
-            cost = cost.with_op(&op, evm_version, cost_model);
-            actions.push(PlannedAction { op, pushed });
+        let build = |ops: SmallVec<[(ScheduledOp, Option<ValueId>); 3]>| {
+            let mut actions = PlannedActions::new();
+            let mut cost = ScheduleCost::default();
+            for (op, pushed) in ops {
+                cost = cost.with_op(&op, evm_version, cost_model);
+                actions.push(PlannedAction { op, pushed });
+            }
+            OperandPlan { actions, cost }
+        };
+        let stack_plan = build(stack_ops);
+        let Some(materialize_resident) = self.materialize_operand(resident, func) else {
+            return Some(stack_plan);
+        };
+        let direct_plan = build(if first == resident {
+            smallvec::smallvec![
+                (materialize_resident, Some(resident)),
+                (materialize_other, Some(other)),
+            ]
+        } else {
+            smallvec::smallvec![
+                (materialize_other, Some(other)),
+                (materialize_resident, Some(resident)),
+            ]
+        });
+        if direct_plan.cost.cmp_for(stack_plan.cost, optimization).is_lt() {
+            Some(direct_plan)
+        } else {
+            Some(stack_plan)
         }
-        Some(OperandPlan { actions, cost })
     }
 
     fn try_unary_operand_plan(
@@ -3476,6 +3525,131 @@ mod tests {
         assert_eq!(ops.len(), operands.len());
         assert!(ops.iter().all(|op| matches!(op, ScheduledOp::PushImmediate(_))));
         assert!(scheduler.stack.iter().eq(operands.iter().rev().copied().map(Some)));
+    }
+
+    #[test]
+    fn operand_plan_materializes_inaccessible_preserved_operand() {
+        let mut func = make_test_func();
+        let a = ValueId::from_usize(0);
+        let b = ValueId::from_usize(1);
+        let (_, preserved) =
+            func.alloc_value_inst(Instruction::new(InstKind::Add(a, b), Some(MirType::uint256())));
+        let immediate = func
+            .alloc_value(Value::Immediate(Immediate::uint256(alloy_primitives::U256::from(42))));
+        let mut scheduler = StackScheduler::new();
+        let slot = scheduler.spills.allocate(preserved);
+        scheduler.spills.mark_reloadable(preserved);
+        scheduler.stack.push(preserved);
+        for value in 0..=MAX_STACK_ACCESS {
+            let unrelated = func.alloc_value(Value::Immediate(Immediate::uint256(
+                alloy_primitives::U256::from(100 + value),
+            )));
+            scheduler.stack.push(unrelated);
+        }
+
+        let plan = scheduler
+            .plan_operands(
+                &[immediate, preserved],
+                &[preserved],
+                &func,
+                OptimizationMode::Gas,
+                EvmVersion::Shanghai,
+                OperandCostModel::DIRECT,
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan.actions.iter().map(|action| &action.op).collect::<Vec<_>>(),
+            [
+                &ScheduledOp::PushImmediate(alloy_primitives::U256::from(42)),
+                &ScheduledOp::LoadSpill(slot),
+            ]
+        );
+        assert_eq!(scheduler.operand_search_stats.get().expansions, 0);
+        scheduler.apply_operand_plan(plan);
+        scheduler.instruction_executed(2, None);
+        assert!(scheduler.stack.contains(preserved));
+    }
+
+    #[test]
+    fn operand_plan_handles_preserved_dup_swap_boundary_without_search() {
+        let mut func = make_test_func();
+        let a = ValueId::from_usize(0);
+        let b = ValueId::from_usize(1);
+        let (_, preserved) =
+            func.alloc_value_inst(Instruction::new(InstKind::Add(a, b), Some(MirType::uint256())));
+        let immediate = func
+            .alloc_value(Value::Immediate(Immediate::uint256(alloy_primitives::U256::from(42))));
+
+        let cases = [
+            (
+                MAX_STACK_ACCESS - 1,
+                [preserved, immediate],
+                vec![
+                    ScheduledOp::Stack(StackOp::Dup(16)),
+                    ScheduledOp::PushImmediate(alloy_primitives::U256::from(42)),
+                ],
+            ),
+            (
+                MAX_STACK_ACCESS - 1,
+                [immediate, preserved],
+                vec![
+                    ScheduledOp::Stack(StackOp::Dup(16)),
+                    ScheduledOp::PushImmediate(alloy_primitives::U256::from(42)),
+                    ScheduledOp::Stack(StackOp::Swap(1)),
+                ],
+            ),
+            (
+                MAX_STACK_ACCESS,
+                [preserved, immediate],
+                vec![
+                    ScheduledOp::Stack(StackOp::Swap(16)),
+                    ScheduledOp::Stack(StackOp::Dup(1)),
+                    ScheduledOp::PushImmediate(alloy_primitives::U256::from(42)),
+                ],
+            ),
+            (
+                MAX_STACK_ACCESS,
+                [immediate, preserved],
+                vec![
+                    ScheduledOp::Stack(StackOp::Swap(16)),
+                    ScheduledOp::PushImmediate(alloy_primitives::U256::from(42)),
+                    ScheduledOp::Stack(StackOp::Dup(2)),
+                ],
+            ),
+        ];
+
+        for (depth, operands, expected) in cases {
+            let mut scheduler = StackScheduler::new();
+            scheduler.spills.allocate(preserved);
+            scheduler.spills.mark_reloadable(preserved);
+            scheduler.stack.push(preserved);
+            for value in 0..depth {
+                let unrelated = func.alloc_value(Value::Immediate(Immediate::uint256(
+                    alloy_primitives::U256::from(100 + value),
+                )));
+                scheduler.stack.push(unrelated);
+            }
+
+            let plan = scheduler
+                .plan_operands(
+                    &operands,
+                    &[preserved],
+                    &func,
+                    OptimizationMode::Gas,
+                    EvmVersion::Shanghai,
+                    OperandCostModel::DIRECT,
+                )
+                .unwrap();
+            assert_eq!(
+                plan.actions.iter().map(|action| action.op.clone()).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(scheduler.operand_search_stats.get().expansions, 0);
+            scheduler.apply_operand_plan(plan);
+            scheduler.instruction_executed(2, None);
+            assert!(scheduler.stack.contains(preserved));
+        }
     }
 
     #[test]

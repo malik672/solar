@@ -125,6 +125,26 @@ pub(crate) struct Assembler<'gcx> {
         FxHashMap<DeferredAlloc, DeferredAllocResolution>,
 }
 
+/// Mutable assembler metadata captured by a local code-generation transaction.
+#[derive(Clone, Debug)]
+pub(in crate::backend::evm) struct AssemblerCheckpoint {
+    current_block: Option<ir::BlockId>,
+    block_labels: Vec<Option<Label>>,
+    label_blocks: FxHashMap<Label, ir::BlockId>,
+    cold_labels: GrowableBitSet<Label>,
+    label_relocations: Vec<(ir::BlockId, usize, Label)>,
+    deferred_relocations: Vec<(ir::BlockId, usize, DeferredConst)>,
+    indexed_jump_relocations: Vec<(ir::BlockId, Vec<Label>)>,
+    push_values: LocalInterner<U256, PushValueId>,
+    immutable_pushes: LocalInterner<ImmutablePush, ImmutablePushId>,
+    next_label: IdCounter<Label>,
+    next_deferred: IdCounter<DeferredConst>,
+    deferred_values: FxHashMap<DeferredConst, U256>,
+    alloc_relocations: Vec<(ir::BlockId, usize, DeferredAlloc)>,
+    next_deferred_alloc: IdCounter<DeferredAlloc>,
+    deferred_allocations: FxHashMap<DeferredAlloc, DeferredAllocResolution>,
+}
+
 /// Final lowering selected for a deferred allocation.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::backend::evm) enum DeferredAllocResolution {
@@ -133,6 +153,44 @@ pub(in crate::backend::evm) enum DeferredAllocResolution {
 }
 
 impl<'gcx> Assembler<'gcx> {
+    pub(in crate::backend::evm) fn checkpoint(&self) -> AssemblerCheckpoint {
+        AssemblerCheckpoint {
+            current_block: self.current_block,
+            block_labels: self.block_labels.clone(),
+            label_blocks: self.label_blocks.clone(),
+            cold_labels: self.cold_labels.clone(),
+            label_relocations: self.label_relocations.clone(),
+            deferred_relocations: self.deferred_relocations.clone(),
+            indexed_jump_relocations: self.indexed_jump_relocations.clone(),
+            push_values: self.push_values.clone(),
+            immutable_pushes: self.immutable_pushes.clone(),
+            next_label: self.next_label.clone(),
+            next_deferred: self.next_deferred.clone(),
+            deferred_values: self.deferred_values.clone(),
+            alloc_relocations: self.alloc_relocations.clone(),
+            next_deferred_alloc: self.next_deferred_alloc.clone(),
+            deferred_allocations: self.deferred_allocations.clone(),
+        }
+    }
+
+    pub(in crate::backend::evm) fn restore_checkpoint(&mut self, checkpoint: &AssemblerCheckpoint) {
+        self.current_block = checkpoint.current_block;
+        self.block_labels.clone_from(&checkpoint.block_labels);
+        self.label_blocks.clone_from(&checkpoint.label_blocks);
+        self.cold_labels.clone_from(&checkpoint.cold_labels);
+        self.label_relocations.clone_from(&checkpoint.label_relocations);
+        self.deferred_relocations.clone_from(&checkpoint.deferred_relocations);
+        self.indexed_jump_relocations.clone_from(&checkpoint.indexed_jump_relocations);
+        self.push_values.clone_from(&checkpoint.push_values);
+        self.immutable_pushes.clone_from(&checkpoint.immutable_pushes);
+        self.next_label.clone_from(&checkpoint.next_label);
+        self.next_deferred.clone_from(&checkpoint.next_deferred);
+        self.deferred_values.clone_from(&checkpoint.deferred_values);
+        self.alloc_relocations.clone_from(&checkpoint.alloc_relocations);
+        self.next_deferred_alloc.clone_from(&checkpoint.next_deferred_alloc);
+        self.deferred_allocations.clone_from(&checkpoint.deferred_allocations);
+    }
+
     /// Creates a new assembler.
     #[must_use]
     pub(crate) fn new(gcx: Gcx<'gcx>) -> Self {
